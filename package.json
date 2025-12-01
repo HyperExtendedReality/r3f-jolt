@@ -1,0 +1,32 @@
+{
+  "name": "r3f-jolt",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.4.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.181.0",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "jolt-physics": "^0.39.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-three-fiber": "^6.0.13",
+    "three": "^0.181.2",
+    "uuid": "^13.0.0",
+    "vite": "^7.2.4",
+    "zustand": "^5.0.9"
+  }
+}
