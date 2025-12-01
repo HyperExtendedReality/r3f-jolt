@@ -16,23 +16,30 @@ export const updateThreeObjectFromJoltBody = (
   bodyId: any,
   object: Object3D
 ) => {
-  // FIX: Use GetPosition() instead of GetCenterOfMassPosition()
-  // GetPosition returns the visual origin (matching Three.js position)
-  const pos = bodyInterface.GetPosition(bodyId);
-  const rot = bodyInterface.GetRotation(bodyId);
+  // Allocate temporary Jolt objects to retrieve data
+  // Using RVec3 for position ensures double precision compatibility
+  const p = new jolt.RVec3();
+  const q = new jolt.Quat();
 
-  object.position.set(pos.GetX(), pos.GetY(), pos.GetZ());
-  object.quaternion.set(rot.GetX(), rot.GetY(), rot.GetZ(), rot.GetW());
+  // Retrieve data from Jolt
+  bodyInterface.GetPositionAndRotation(bodyId, p, q);
 
-  jolt.destroy(pos);
-  jolt.destroy(rot);
+  // Apply to Three.js object
+  object.position.set(p.GetX(), p.GetY(), p.GetZ());
+  object.quaternion.set(q.GetX(), q.GetY(), q.GetZ(), q.GetW());
+
+  // Clean up Jolt objects immediately
+  jolt.destroy(p);
+  jolt.destroy(q);
 };
 
 export const setupCollisionFiltering = (Jolt: any) => {
+  // 1. Create ObjectLayerPairFilter
   const objectFilter = new Jolt.ObjectLayerPairFilterTable(NUM_OBJECT_LAYERS);
   objectFilter.EnableCollision(LAYER_NON_MOVING, LAYER_MOVING);
   objectFilter.EnableCollision(LAYER_MOVING, LAYER_MOVING);
 
+  // 2. Create BroadPhaseLayerInterface
   const BP_LAYER_NON_MOVING = new Jolt.BroadPhaseLayer(0);
   const BP_LAYER_MOVING = new Jolt.BroadPhaseLayer(1);
   const NUM_BROAD_PHASE_LAYERS = 2;
@@ -42,12 +49,16 @@ export const setupCollisionFiltering = (Jolt: any) => {
     NUM_BROAD_PHASE_LAYERS
   );
   
+  // Map layers
   bpInterface.MapObjectToBroadPhaseLayer(LAYER_NON_MOVING, BP_LAYER_NON_MOVING);
   bpInterface.MapObjectToBroadPhaseLayer(LAYER_MOVING, BP_LAYER_MOVING);
-  
-  // Note: We deliberately do NOT destroy BP_LAYER_* here because 
-  // Jolt's BroadPhaseLayerInterfaceTable might hold references depending on version.
 
+  // FIX: Destroy BP_LAYER objects immediately after mapping (as per HelloWorld.js)
+  // They are copied into the interface table.
+  Jolt.destroy(BP_LAYER_NON_MOVING);
+  Jolt.destroy(BP_LAYER_MOVING);
+
+  // 3. Create ObjectVsBroadPhaseLayerFilter
   const objectVsBroadphaseFilter = new Jolt.ObjectVsBroadPhaseLayerFilterTable(
     bpInterface,
     NUM_BROAD_PHASE_LAYERS,
