@@ -1,135 +1,130 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useMemo, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { PhysicsProvider, usePhysics } from "./jolt/PhysicsProvider";
-import { Rigidbody } from "./jolt/RigidBody";
-import { Softbody } from "./jolt/SoftBody";
-import { LAYER_MOVING, LAYER_NON_MOVING, createJoltVec3 } from "./jolt/utils";
+import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 
-// --- Components (Floor, FallingBox, FallingCloth) as defined in previous answers ---
-// Copy them here (Floor, FallingBox, FallingCloth) ...
-// Ensure you do NOT destroy 'shape' or 'shared' in their cleanups!
+import { PhysicsProvider } from "./jolt/PhysicsProvider";
+import { RigidBody } from "./jolt/RigidBody";
+import { SoftBody } from "./jolt/SoftBody";
+import { LAYER_NON_MOVING, LAYER_MOVING } from "./jolt/utils";
+
+// Optional: Import threaded WASM if you have COOP/COEP headers set up
+// import initJoltMulti from 'jolt-physics/wasm-multithread';
 
 const Floor = () => {
-  const { jolt } = usePhysics();
-  const [settings, setSettings] = useState<any>(null);
-
-  useEffect(() => {
-    if (!jolt) return;
+  // We pass a callback to RigidBody which creates the settings.
+  // RigidBody handles the lifecycle: create body -> destroy settings.
+  const getSettings = useCallback((jolt: any) => {
     const size = new jolt.Vec3(15, 1, 15);
-    const shapeSettings = new jolt.BoxShapeSettings(size);
+    const shapeSettings = new jolt.BoxShapeSettings(size, 0.05); // 0.05 convex radius
     const shapeResult = shapeSettings.Create();
     const shape = shapeResult.Get();
-    const pos = createJoltVec3(jolt, 0, -1, 0);
-    const rot = new jolt.Quat(0, 0, 0, 1);
+    shapeResult.Clear(); // Release result reference
 
-    const bodySettings = new jolt.BodyCreationSettings(
+    const settings = new jolt.BodyCreationSettings(
       shape,
-      pos,
-      rot,
+      jolt.RVec3.prototype.sZero(),
+      jolt.Quat.prototype.sIdentity(),
       jolt.EMotionType_Static,
       LAYER_NON_MOVING
     );
-    bodySettings.mFriction = 0.5;
+    settings.mFriction = 1.0;
 
-    setSettings(bodySettings);
-
+    // Cleanup temporary objects used during creation
     jolt.destroy(size);
     jolt.destroy(shapeSettings);
-    jolt.destroy(shapeResult);
-    jolt.destroy(pos);
-    jolt.destroy(rot);
+    // Note: 'shape' is now owned by 'settings' (and later the body),
+    // we don't destroy it manually if we used the Settings -> Create pattern correctly.
+    // However, shapeResult.Clear() handled the result wrapper.
 
-    return () => {
-      if (bodySettings) jolt.destroy(bodySettings);
-    };
-  }, [jolt]);
+    return settings;
+  }, []);
 
-  if (!settings) return null;
   return (
-    <Rigidbody settings={settings}>
+    <RigidBody getSettings={getSettings} position={[0, -1, 0]}>
       <mesh receiveShadow>
         <boxGeometry args={[30, 2, 30]} />
-        <meshStandardMaterial color="#444" />
+        <meshStandardMaterial color="#333" />
       </mesh>
-    </Rigidbody>
+    </RigidBody>
   );
 };
 
 const FallingBox = () => {
-  const { jolt } = usePhysics();
-  const [settings, setSettings] = useState<any>(null);
-
-  useEffect(() => {
-    if (!jolt) return;
+  const getSettings = useCallback((jolt: any) => {
+    // Simple shape creation pattern
     const size = new jolt.Vec3(1, 1, 1);
-    const shapeSettings = new jolt.BoxShapeSettings(size);
-    const shapeResult = shapeSettings.Create();
-    const shape = shapeResult.Get();
 
-    const pos = createJoltVec3(jolt, 0, 10, 0);
-    const rot = new jolt.Quat(0, 0, 0, 1);
+    // Direct Shape creation (careful with refs)
+    // BoxShape(halfExtent, convexRadius, material)
+    const shape = new jolt.BoxShape(size, 0.05, null);
 
-    const bodySettings = new jolt.BodyCreationSettings(
+    const settings = new jolt.BodyCreationSettings(
       shape,
-      pos,
-      rot,
+      jolt.RVec3.prototype.sZero(),
+      jolt.Quat.prototype.sIdentity(),
       jolt.EMotionType_Dynamic,
       LAYER_MOVING
     );
-    bodySettings.mRestitution = 0.5;
-
-    setSettings(bodySettings);
+    settings.mRestitution = 0.5;
 
     jolt.destroy(size);
-    jolt.destroy(shapeSettings);
-    jolt.destroy(shapeResult);
-    jolt.destroy(pos);
-    jolt.destroy(rot);
+    // We don't destroy 'shape' because 'settings' takes a pointer.
+    // When 'settings' is destroyed in RigidBody, it decrements shape ref.
 
-    return () => {
-      if (bodySettings) jolt.destroy(bodySettings);
-    };
-  }, [jolt]);
+    return settings;
+  }, []);
 
-  if (!settings) return null;
   return (
-    <Rigidbody settings={settings}>
+    <RigidBody getSettings={getSettings} position={[0, 10, 0]}>
       <mesh castShadow>
         <boxGeometry args={[2, 2, 2]} />
         <meshStandardMaterial color="orange" />
       </mesh>
-    </Rigidbody>
+    </RigidBody>
   );
 };
 
-// ... FallingCloth (use previous safe version) ...
+const JellySphere = () => {
+  // Use a highly detailed geometry for the soft body so it looks good
+  const geometry = useMemo(() => new THREE.IcosahedronGeometry(2, 5), []);
+
+  return (
+    <SoftBody pressure={5000} position={[0, 15, 0]}>
+      <mesh geometry={geometry} castShadow>
+        <meshPhysicalMaterial
+          color="hotpink"
+          transmission={0.2}
+          thickness={2}
+          roughness={0.2}
+          clearcoat={1}
+        />
+      </mesh>
+    </SoftBody>
+  );
+};
 
 export default function App() {
   return (
-    // Ensure the container has explicit size and background
-    <div
-      style={{
-        width: "100vw",
-        height: "100vh",
-        background: "#111",
-        overflow: "hidden",
-      }}
-    >
-      <Canvas shadows>
-        <PerspectiveCamera makeDefault position={[12, 12, 12]} fov={50} />
-        <OrbitControls target={[0, 2, 0]} />
-
+    <div style={{ width: "100vw", height: "100vh", background: "#111" }}>
+      <Canvas shadows camera={{ position: [0, 5, 20], fov: 50 }}>
         <ambientLight intensity={0.5} />
-        <pointLight position={[10, 20, 10]} castShadow intensity={800} />
+        <spotLight
+          position={[10, 20, 10]}
+          angle={0.3}
+          penumbra={1}
+          castShadow
+          intensity={50}
+          shadow-mapSize={[2048, 2048]}
+        />
 
-        {/* PhysicsProvider inside Canvas allows using Html overlay for loading */}
         <PhysicsProvider>
           <Floor />
           <FallingBox />
-          {/* <FallingCloth /> Uncomment this once basics work */}
+          <JellySphere />
         </PhysicsProvider>
+
+        <OrbitControls />
       </Canvas>
     </div>
   );

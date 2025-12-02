@@ -6,115 +6,152 @@ import React, {
   useRef,
 } from "react";
 import { useFrame } from "@react-three/fiber";
-import { Html } from "@react-three/drei";
 // @ts-ignore
-import initJolt from "jolt-physics";
+import defaultInitJolt from "jolt-physics/wasm-multithread";
 import { setupCollisionFiltering } from "./utils";
+import { Jolt } from "./types";
 
-type PhysicsContextType = {
-  jolt: any;
-  joltInterface: any;
+interface PhysicsContextValue {
+  jolt: Jolt;
   physicsSystem: any;
   bodyInterface: any;
-};
+  debug: boolean;
+}
 
-const PhysicsContext = createContext<PhysicsContextType | null>(null);
-
-let joltPromise: Promise<any> | null = null;
+const PhysicsContext = createContext<PhysicsContextValue | null>(null);
 
 export const usePhysics = () => {
-  const context = useContext(PhysicsContext);
-  if (!context)
-    throw new Error("usePhysics must be used within a PhysicsProvider");
-  return context;
+  const ctx = useContext(PhysicsContext);
+  if (!ctx) throw new Error("usePhysics must be used within PhysicsProvider");
+  return ctx;
 };
 
-export const PhysicsProvider: React.FC<{ children: React.ReactNode }> = ({
+interface PhysicsProviderProps {
+  children: React.ReactNode;
+  loader?: (opts?: any) => Promise<Jolt>;
+  debug?: boolean;
+}
+
+let globalJoltPromise: Promise<Jolt> | null = null;
+
+export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
   children,
+  loader,
+  debug = false,
 }) => {
-  const [jolt, setJolt] = useState<any>(null);
-  const [joltInterface, setJoltInterface] = useState<any>(null);
-  const [physicsSystem, setPhysicsSystem] = useState<any>(null);
-  const [bodyInterface, setBodyInterface] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+
+  const joltRef = useRef<Jolt | null>(null);
+  const physicsSystemRef = useRef<any>(null);
+  const bodyInterfaceRef = useRef<any>(null);
+  const memoryBeforeRef = useRef<number>(0);
 
   useEffect(() => {
-    let unmounted = false;
+    let isMounted = true;
 
-    const load = async () => {
-      try {
-        if (!joltPromise) joltPromise = initJolt();
-        const Jolt = await joltPromise;
-        if (unmounted) return;
-
-        const settings = new Jolt.JoltSettings();
-
-        // Setup collision filtering
-        // We do NOT store these in a ref for cleanup anymore.
-        // JoltInterface takes ownership of them.
-        const filters = setupCollisionFiltering(Jolt);
-
-        settings.mObjectLayerPairFilter = filters.objectFilter;
-        settings.mBroadPhaseLayerInterface = filters.bpInterface;
-        settings.mObjectVsBroadPhaseLayerFilter =
-          filters.objectVsBroadphaseFilter;
-
-        // Initialize Jolt Interface
-        // This copies the settings and takes ownership of the filters
-        const iface = new Jolt.JoltInterface(settings);
-
-        // Cleanup settings object immediately (interface has its own copy)
-        Jolt.destroy(settings);
-
-        setJolt(Jolt);
-        setJoltInterface(iface);
-        setPhysicsSystem(iface.GetPhysicsSystem());
-        setBodyInterface(iface.GetPhysicsSystem().GetBodyInterface());
-      } catch (e: any) {
-        console.error("Jolt Init Error", e);
-        setError(e.message);
+    const init = async () => {
+      if (!globalJoltPromise) {
+        const initFn = loader || defaultInitJolt;
+        globalJoltPromise = initFn({
+          allowMemoryGrowth: true,
+          INITIAL_MEMORY: 128 * 1024 * 1024,
+        });
       }
+
+      const jolt = await globalJoltPromise;
+      if (!isMounted) return;
+
+      if (jolt.JoltInterface && jolt.JoltInterface.prototype.sGetFreeMemory) {
+        memoryBeforeRef.current = jolt.JoltInterface.prototype.sGetFreeMemory();
+      }
+
+      const settings = new jolt.JoltSettings();
+
+      // Prevent browser freeze
+      settings.mMaxWorkerThreads = 3;
+
+      settings.mMaxBodies = 4096;
+      settings.mMaxBodyPairs = 4096;
+      settings.mMaxContactConstraints = 4096;
+      // Fixed: Increased to 64MB to prevent TempAllocator errors during softbody optimization
+      settings.mTempAllocatorSize = 64 * 1024 * 1024;
+
+      const { objectFilter, bpInterface, objectVsBroadphaseFilter } =
+        setupCollisionFiltering(jolt);
+
+      settings.mObjectLayerPairFilter = objectFilter;
+      settings.mBroadPhaseLayerInterface = bpInterface;
+      settings.mObjectVsBroadPhaseLayerFilter = objectVsBroadphaseFilter;
+
+      const joltInterface = new jolt.JoltInterface(settings);
+
+      jolt.destroy(settings);
+
+      joltRef.current = jolt;
+
+      (joltInterface as any)._cleanupUserData = {
+        objectFilter,
+        bpInterface,
+        objectVsBroadphaseFilter,
+      };
+
+      physicsSystemRef.current = joltInterface.GetPhysicsSystem();
+      bodyInterfaceRef.current = physicsSystemRef.current.GetBodyInterface();
+
+      (joltRef.current as any).interface = joltInterface;
+
+      setReady(true);
     };
 
-    load();
+    init();
 
     return () => {
-      unmounted = true;
-      if (joltInterface) {
-        // Destroying the interface destroys the physics system and the filters it owns
-        jolt.destroy(joltInterface);
-        setJoltInterface(null);
-        setPhysicsSystem(null);
-        setBodyInterface(null);
+      isMounted = false;
+      const jolt = joltRef.current;
+      const iface = (jolt as any)?.interface;
+
+      if (jolt && iface) {
+        jolt.destroy(iface);
+
+        if (iface._cleanupUserData) {
+          jolt.destroy(iface._cleanupUserData.objectVsBroadphaseFilter);
+          jolt.destroy(iface._cleanupUserData.bpInterface);
+          jolt.destroy(iface._cleanupUserData.objectFilter);
+        }
+
+        if (jolt.JoltInterface && jolt.JoltInterface.prototype.sGetFreeMemory) {
+          const memoryAfter = jolt.JoltInterface.prototype.sGetFreeMemory();
+          console.log(
+            `[Jolt] Cleanup. Leaked: ${
+              memoryBeforeRef.current - memoryAfter
+            } bytes`
+          );
+        }
       }
     };
-  }, []);
+  }, [loader]);
 
   useFrame((state, delta) => {
-    if (!joltInterface) return;
-    // Cap delta time to prevent instability
-    const dt = Math.min(delta, 1 / 30);
-    // Step the simulation
-    // 1 / 60.0 is the fixed step, 1 is collision steps
-    joltInterface.Step(dt, 1);
+    const iface = (joltRef.current as any)?.interface;
+    if (!iface) return;
+
+    // Prevent spiral of death
+    const deltaTime = Math.min(delta, 1.0 / 30.0);
+    const numSteps = deltaTime > 1.0 / 55.0 ? 2 : 1;
+
+    iface.Step(deltaTime, numSteps);
   });
 
-  if (error)
-    return (
-      <Html center>
-        <div style={{ background: "white", color: "red" }}>Error: {error}</div>
-      </Html>
-    );
-  if (!jolt || !physicsSystem)
-    return (
-      <Html center>
-        <div style={{ color: "white" }}>Initializing Physics...</div>
-      </Html>
-    );
+  if (!ready) return null;
 
   return (
     <PhysicsContext.Provider
-      value={{ jolt, joltInterface, physicsSystem, bodyInterface }}
+      value={{
+        jolt: joltRef.current!,
+        physicsSystem: physicsSystemRef.current,
+        bodyInterface: bodyInterfaceRef.current,
+        debug,
+      }}
     >
       {children}
     </PhysicsContext.Provider>
