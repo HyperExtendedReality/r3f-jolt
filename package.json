@@ -13,6 +13,7 @@
     "build": "tsc --noEmit && npm run build:lib && npm run build:demo",
     "build:lib": "tsup",
     "build:demo": "vite build",
+    "prepare": "npm run build:lib",
     "preview": "vite preview"
   },
   "keywords": [],
