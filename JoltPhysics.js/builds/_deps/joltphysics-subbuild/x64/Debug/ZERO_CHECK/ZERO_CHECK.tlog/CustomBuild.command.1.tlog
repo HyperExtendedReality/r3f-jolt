@@ -1,0 +1,10 @@
+^C:\DEV\R3F-JOLT\SRC\JOLTPHYSICS.JS\BUILDS\_DEPS\JOLTPHYSICS-SUBBUILD\CMAKEFILES\3714AE67BC222F2EAE501668BF0568C3\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Dev/r3f-jolt/src/JoltPhysics.js/builds/_deps/joltphysics-subbuild -BC:/Dev/r3f-jolt/src/JoltPhysics.js/builds/_deps/joltphysics-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Dev/r3f-jolt/src/JoltPhysics.js/builds/_deps/joltphysics-subbuild/joltphysics-populate.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

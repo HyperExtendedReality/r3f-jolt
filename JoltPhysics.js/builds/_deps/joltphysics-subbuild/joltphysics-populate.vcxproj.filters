@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\e8711f0959e043158ec9196101626805\joltphysics-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\df7f4c70c506e0f56190ec3e61389364\joltphysics-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\3714ae67bc222f2eae501668bf0568c3\joltphysics-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\Dev\r3f-jolt\src\JoltPhysics.js\builds\_deps\joltphysics-subbuild\CMakeFiles\joltphysics-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{6FF1A519-5173-3F82-831A-3267F803FAEE}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

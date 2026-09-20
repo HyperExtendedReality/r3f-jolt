@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Dev/r3f-jolt/src/JoltPhysics.js/builds/_deps/joltphysics-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
