@@ -1,7 +1,7 @@
 /node_modules
 /dist
 /demo-dist
-/src/JoltPhysics.js/.github
-/src/JoltPhysics.js/builds
+/JoltPhysics.js/.github
+/JoltPhysics.js/builds
 # CocoIndex Code (ccc)
 /.cocoindex_code/

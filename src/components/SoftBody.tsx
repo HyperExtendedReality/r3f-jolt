@@ -1,14 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useLoader, type ThreeElements } from "@react-three/fiber";
 import * as THREE from "three";
 import { useJolt } from "../context/JoltContext";
 import { SoftBodyCreator } from "../utils/SoftBodyCreator";
 import { toJoltQuat, toJoltRVec3, LAYER_MOVING } from "../utils/joltUtils";
 import type Jolt from "jolt-physics";
+import { softBodyMaterials, type SoftBodyPhysicsMaterial } from "../materials/SoftBodyPhysicsMaterial";
 
 type SoftBodyType = "Sphere" | "Cloth" | "Cube";
 
 export interface SoftBodyConfig {
+  inverseMass?: number;
   radius?: number;
   numTheta?: number;
   numPhi?: number;
@@ -44,6 +46,8 @@ export interface SoftBodyProps extends SoftBodyMeshProps {
   /** Triangle geometry used to create a custom soft body. */
   geometry?: THREE.BufferGeometry;
   config?: SoftBodyConfig;
+  /** Physical behavior, independent of the Three.js visual material. */
+  physicsMaterial?: keyof typeof softBodyMaterials | SoftBodyPhysicsMaterial;
   position?: [number, number, number];
   rotation?: [number, number, number, number];
   pressure?: number;
@@ -53,6 +57,8 @@ export interface SoftBodyProps extends SoftBodyMeshProps {
   restitution?: number;
   linearDamping?: number;
   gravityFactor?: number;
+  initialLinearVelocity?: [number, number, number];
+  onBodyCreated?: (body: Jolt.Body | null) => void;
   doubleSided?: boolean;
   color?: string | number;
   /** A preloaded Three.js texture or an image URL for the default material. */
@@ -75,9 +81,12 @@ interface SoftBodyCreationData {
   uvs: Float32Array | null;
   renderIndices?: Uint16Array | Uint32Array;
   renderToPhysics?: Uint32Array;
+  closed: boolean;
 }
 
 interface SoftBodyRuntime {
+  settings: Jolt.SoftBodySharedSettings;
+  closed: boolean;
   body: Jolt.Body;
   bodyId: Jolt.BodyID;
   motionProperties: Jolt.SoftBodyMotionProperties;
@@ -203,7 +212,7 @@ const createClothData = (
     config.vertexGetInvMass ??
     ((x: number, z: number) => {
       if (!shouldFixCorners) {
-        return 1;
+        return config.inverseMass ?? 1;
       }
 
       const isCorner =
@@ -212,7 +221,7 @@ const createClothData = (
         (x === 0 && z === gridSizeZ - 1) ||
         (x === gridSizeX - 1 && z === gridSizeZ - 1);
 
-      return isCorner ? 0 : 1;
+      return isCorner ? 0 : config.inverseMass ?? 1;
     });
   const perturbation =
     config.vertexPerturbation ?? (() => ({ x: 0, y: 0, z: 0 }));
@@ -257,7 +266,8 @@ const createSphereData = (
       config.numTheta ?? 10,
       config.numPhi ?? 20,
       config.bendType ?? jolt.SoftBodySharedSettings_EBendType_None,
-      attributes ?? undefined
+      attributes ?? undefined,
+      config.inverseMass ?? 1
     );
   } finally {
     if (attributes) {
@@ -275,7 +285,8 @@ const createCubeData = (
     config.gridSize ?? 5,
     config.gridSpacing ?? 0.5,
     config.edgeCompliance ?? 0,
-    config.volumeCompliance ?? 0
+    config.volumeCompliance ?? 0,
+    config.inverseMass ?? 1
   );
 };
 
@@ -295,7 +306,9 @@ const createGeometryData = (
       jolt,
       geometry,
       attributes ?? undefined,
-      config.bendType ?? jolt.SoftBodySharedSettings_EBendType_Dihedral
+      config.bendType ?? jolt.SoftBodySharedSettings_EBendType_Dihedral,
+      1e-5,
+      config.inverseMass ?? 1
     );
   } finally {
     if (attributes) {
@@ -322,6 +335,22 @@ const createSoftBodyData = (
     case "Sphere":
     default:
       return createSphereData(jolt, config);
+  }
+};
+
+const validateSoftBody = (config: SoftBodyConfig, pressure: number, iterations?: number) => {
+  for (const key of ["inverseMass", "compliance", "shearCompliance", "bendCompliance", "edgeCompliance", "volumeCompliance"] as const) {
+    const value = config[key];
+    if (value != null && (!Number.isFinite(value) || value < 0)) throw new Error(`SoftBody ${key} must be finite and nonnegative`);
+  }
+  if (!Number.isFinite(pressure) || pressure < 0) throw new Error("SoftBody pressure must be finite and nonnegative");
+  if (iterations != null && (!Number.isInteger(iterations) || iterations < 1)) throw new Error("SoftBody iterations must be a positive integer");
+  if (config.radius != null && (!Number.isFinite(config.radius) || config.radius <= 0)) throw new Error("SoftBody radius must be positive");
+  if (config.gridSpacing != null && (!Number.isFinite(config.gridSpacing) || config.gridSpacing <= 0)) throw new Error("SoftBody gridSpacing must be positive");
+  for (const key of ["gridSize", "gridSizeX", "gridSizeZ", "numTheta", "numPhi"] as const) {
+    const value = config[key];
+    const minimum = key === "numTheta" || key === "numPhi" ? 3 : 2;
+    if (value != null && (!Number.isInteger(value) || value < minimum)) throw new Error(`SoftBody ${key} must be an integer of at least ${minimum}`);
   }
 };
 
@@ -402,6 +431,8 @@ const buildSoftBodyRuntime = (
   }
 
   const runtime: SoftBodyRuntime = {
+    settings: creationData.settings,
+    closed: creationData.closed,
     body,
     bodyId: body.GetID(),
     motionProperties,
@@ -503,15 +534,18 @@ const SoftBodyImpl = (
   type,
   geometry,
   config = DEFAULT_CONFIG,
+  physicsMaterial,
   position = DEFAULT_POSITION,
   rotation = DEFAULT_ROTATION,
-  pressure = 0,
+  pressure,
   iterations,
   vertexRadius,
   friction,
   restitution,
   linearDamping,
   gravityFactor,
+  initialLinearVelocity,
+  onBodyCreated,
   doubleSided,
   color,
   texture,
@@ -524,10 +558,32 @@ const SoftBodyImpl = (
   }: SoftBodyProps,
   forwardedRef: React.ForwardedRef<THREE.Mesh>
 ) => {
-  const { jolt, bodyInterface } = useJolt();
+  const world = useJolt();
+  const { jolt, bodyInterface } = world;
   const meshRef = useRef<THREE.Mesh>(null);
-  const geometryRef = useRef<THREE.BufferGeometry>(new THREE.BufferGeometry());
+  const [renderGeometry] = useState(() => new THREE.BufferGeometry());
   const runtimeRef = useRef<SoftBodyRuntime | null>(null);
+
+  const materialSettings: SoftBodyPhysicsMaterial | undefined = typeof physicsMaterial === "string"
+    ? softBodyMaterials[physicsMaterial]
+    : physicsMaterial;
+  const materialKey = JSON.stringify(materialSettings);
+  const resolvedConfig = useMemo<SoftBodyConfig>(() => ({
+    ...config,
+    inverseMass: config.inverseMass ?? materialSettings?.inverseMass,
+    compliance: config.compliance ?? materialSettings?.compliance,
+    shearCompliance: config.shearCompliance ?? materialSettings?.shearCompliance,
+    bendCompliance: config.bendCompliance ?? materialSettings?.bendCompliance,
+    edgeCompliance: config.edgeCompliance ?? materialSettings?.compliance,
+    volumeCompliance: config.volumeCompliance ?? materialSettings?.volumeCompliance,
+  }), [config, materialKey]);
+  const resolvedPressure = pressure ?? materialSettings?.pressure ?? 0;
+  const resolvedIterations = iterations ?? materialSettings?.iterations;
+  const resolvedVertexRadius = vertexRadius ?? materialSettings?.vertexRadius;
+  const resolvedFriction = friction ?? materialSettings?.friction;
+  const resolvedRestitution = restitution ?? materialSettings?.restitution;
+  const resolvedLinearDamping = linearDamping ?? materialSettings?.linearDamping;
+  const resolvedGravityFactor = gravityFactor ?? materialSettings?.gravityFactor;
 
   const setMeshRef = useCallback(
     (mesh: THREE.Mesh | null) => {
@@ -541,20 +597,24 @@ const SoftBodyImpl = (
     [forwardedRef]
   );
 
-  const configKey = JSON.stringify(config);
+  const configKey = JSON.stringify(resolvedConfig);
   const geometryKey = geometry?.uuid ?? "";
   const positionKey = position.join(",");
   const rotationKey = rotation.join(",");
 
   useEffect(() => {
     return () => {
-      geometryRef.current.dispose();
+      renderGeometry.dispose();
     };
   }, []);
 
   useEffect(() => {
-    const renderGeometry = geometryRef.current;
-    const creationData = createSoftBodyData(jolt, type, config, geometry);
+    validateSoftBody(resolvedConfig, resolvedPressure, resolvedIterations);
+    const creationData = createSoftBodyData(jolt, type, resolvedConfig, geometry);
+    if (resolvedPressure > 0 && !creationData.closed) {
+      jolt.destroy(creationData.settings);
+      throw new Error("SoftBody pressure requires a sealed, consistently oriented triangle mesh");
+    }
     const initialPosition = toJoltRVec3(jolt, position);
     const initialRotation = toJoltQuat(jolt, rotation);
     const creationSettings = new jolt.SoftBodyCreationSettings(
@@ -564,33 +624,33 @@ const SoftBodyImpl = (
       LAYER_MOVING
     );
 
-    creationSettings.mPressure = pressure;
+    creationSettings.mPressure = resolvedPressure;
     creationSettings.mUpdatePosition = false;
     creationSettings.mFacesDoubleSided =
       doubleSided ?? (type === "Cloth" || Boolean(geometry));
 
-    if (iterations != null) {
-      creationSettings.mNumIterations = iterations;
+    if (resolvedIterations != null) {
+      creationSettings.mNumIterations = resolvedIterations;
     }
 
-    if (vertexRadius != null) {
-      creationSettings.mVertexRadius = vertexRadius;
+    if (resolvedVertexRadius != null) {
+      creationSettings.mVertexRadius = resolvedVertexRadius;
     }
 
-    if (friction != null) {
-      creationSettings.mFriction = friction;
+    if (resolvedFriction != null) {
+      creationSettings.mFriction = resolvedFriction;
     }
 
-    if (restitution != null) {
-      creationSettings.mRestitution = restitution;
+    if (resolvedRestitution != null) {
+      creationSettings.mRestitution = resolvedRestitution;
     }
 
-    if (linearDamping != null) {
-      creationSettings.mLinearDamping = linearDamping;
+    if (resolvedLinearDamping != null) {
+      creationSettings.mLinearDamping = resolvedLinearDamping;
     }
 
-    if (gravityFactor != null) {
-      creationSettings.mGravityFactor = gravityFactor;
+    if (resolvedGravityFactor != null) {
+      creationSettings.mGravityFactor = resolvedGravityFactor;
     }
 
     const body = bodyInterface.CreateSoftBody(creationSettings);
@@ -603,9 +663,17 @@ const SoftBodyImpl = (
       creationData,
       updateNormals
     );
+    if (initialLinearVelocity) {
+      const vertices = runtime.motionProperties.GetVertices();
+      for (let i = 0; i < vertices.size(); i += 1) {
+        const velocity = vertices.at(i).mVelocity;
+        velocity.Set(...initialLinearVelocity);
+      }
+    }
 
     bodyInterface.AddBody(bodyId, jolt.EActivation_Activate);
     runtimeRef.current = runtime;
+    onBodyCreated?.(body);
 
     if (meshRef.current) {
       syncSoftBodyMesh(jolt, runtime, meshRef.current);
@@ -617,6 +685,7 @@ const SoftBodyImpl = (
 
     return () => {
       if (
+        !world.alive ||
         !runtimeRef.current ||
         runtimeRef.current.bodyId.GetIndexAndSequenceNumber() !== bodyKey
       ) {
@@ -624,16 +693,19 @@ const SoftBodyImpl = (
       }
 
       runtimeRef.current = null;
+      onBodyCreated?.(null);
       bodyInterface.RemoveBody(bodyId);
+      // The body holds the only reference to its shared settings, so Jolt frees them here.
       bodyInterface.DestroyBody(bodyId);
     };
   }, [
     bodyInterface,
-    config.vertexGetInvMass,
-    config.vertexPerturbation,
+    resolvedConfig.vertexGetInvMass,
+    resolvedConfig.vertexPerturbation,
     configKey,
     doubleSided,
     geometryKey,
+    initialLinearVelocity?.join(","),
     jolt,
     type,
     updateNormals,
@@ -665,47 +737,50 @@ const SoftBodyImpl = (
     const runtime = runtimeRef.current;
     if (!runtime) return;
 
-    runtime.motionProperties.SetPressure(pressure);
+    validateSoftBody(resolvedConfig, resolvedPressure, resolvedIterations);
+    if (resolvedPressure > 0 && !runtime.closed) throw new Error("SoftBody pressure requires a sealed, consistently oriented triangle mesh");
+
+    runtime.motionProperties.SetPressure(resolvedPressure);
     runtime.motionProperties.SetUpdatePosition(false);
 
-    if (iterations != null) {
-      runtime.motionProperties.SetNumIterations(iterations);
+    if (resolvedIterations != null) {
+      runtime.motionProperties.SetNumIterations(resolvedIterations);
     }
 
-    if (vertexRadius != null) {
-      runtime.motionProperties.SetVertexRadius(vertexRadius);
+    if (resolvedVertexRadius != null) {
+      runtime.motionProperties.SetVertexRadius(resolvedVertexRadius);
     }
 
-    if (linearDamping != null) {
-      runtime.motionProperties.SetLinearDamping(linearDamping);
+    if (resolvedLinearDamping != null) {
+      runtime.motionProperties.SetLinearDamping(resolvedLinearDamping);
     }
 
-    if (gravityFactor != null) {
-      runtime.motionProperties.SetGravityFactor(gravityFactor);
+    if (resolvedGravityFactor != null) {
+      runtime.motionProperties.SetGravityFactor(resolvedGravityFactor);
     }
 
     bodyInterface.ActivateBody(runtime.bodyId);
   }, [
     bodyInterface,
-    gravityFactor,
-    iterations,
-    linearDamping,
-    pressure,
-    vertexRadius,
+    resolvedGravityFactor,
+    resolvedIterations,
+    resolvedLinearDamping,
+    resolvedPressure,
+    resolvedVertexRadius,
   ]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
     if (!runtime) return;
 
-    if (friction != null) {
-      bodyInterface.SetFriction(runtime.bodyId, friction);
+    if (resolvedFriction != null) {
+      bodyInterface.SetFriction(runtime.bodyId, resolvedFriction);
     }
 
-    if (restitution != null) {
-      bodyInterface.SetRestitution(runtime.bodyId, restitution);
+    if (resolvedRestitution != null) {
+      bodyInterface.SetRestitution(runtime.bodyId, resolvedRestitution);
     }
-  }, [bodyInterface, friction, restitution]);
+  }, [bodyInterface, resolvedFriction, resolvedRestitution]);
 
   useFrame(() => {
     const runtime = runtimeRef.current;
@@ -717,7 +792,7 @@ const SoftBodyImpl = (
     runtime.wasActive = isActive;
 
     syncSoftBodyMesh(jolt, runtime, mesh);
-  });
+  }, -50);
 
   const materialColor = color ?? (texture ? "white" : "hotpink");
 
@@ -725,7 +800,7 @@ const SoftBodyImpl = (
     <mesh
       {...meshProps}
       ref={setMeshRef}
-      geometry={geometryRef.current}
+      geometry={renderGeometry}
       material={material}
       frustumCulled={frustumCulled}
     >

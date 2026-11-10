@@ -10,6 +10,15 @@ import {
   LAYER_NON_MOVING,
 } from "../utils/joltUtils";
 import type Jolt from "jolt-physics";
+import { containSphere } from "../utils/containment";
+
+export interface RigidImpact {
+  impulse: number;
+  position: [number, number, number];
+  rotation: [number, number, number, number];
+  velocity: [number, number, number];
+  angularVelocity: [number, number, number];
+}
 
 export interface RigidBodyProps {
   position?: [number, number, number];
@@ -24,13 +33,26 @@ export interface RigidBodyProps {
   linearDamping?: number;
   angularDamping?: number;
   gravityFactor?: number;
+  /** A sealed SoftBody mesh that keeps this rigid body inside it. */
+  containedBy?: React.RefObject<THREE.Mesh | null>;
+  /** Radius of the item in world units for containment; defaults to zero. */
+  containmentRadius?: number;
+  initialLinearVelocity?: [number, number, number];
+  initialAngularVelocity?: [number, number, number];
+  /** Approximate impact impulse, measured from rigid body velocity change. */
+  onImpact?: (impact: RigidImpact) => void;
+  impactThreshold?: number;
+  onBodyCreated?: (body: Jolt.Body | null) => void;
   children?: React.ReactNode;
 }
 
 const DEFAULT_POSITION: [number, number, number] = [0, 0, 0];
 const DEFAULT_ROTATION: [number, number, number, number] = [0, 0, 0, 1];
 const DEFAULT_ARGS = [1, 1, 1];
-const CONVEX_RADIUS = 0.05;
+// Per-frame scratch values; useFrame callbacks run one at a time.
+const velocity = new THREE.Vector3();
+const gravity = new THREE.Vector3();
+const bodyPosition = new THREE.Vector3();
 
 const findFirstMesh = (root: THREE.Object3D): THREE.Mesh | null => {
   let mesh: THREE.Mesh | null = null;
@@ -78,13 +100,6 @@ const normalizeShape = (
   }
 };
 
-const createDefaultBoxShape = (jolt: typeof Jolt) => {
-  const halfExtent = new jolt.Vec3(0.5, 0.5, 0.5);
-  const shapeSettings = new jolt.BoxShapeSettings(halfExtent, CONVEX_RADIUS);
-  jolt.destroy(halfExtent);
-  return shapeSettings;
-};
-
 const createShapeSettings = (
   jolt: typeof Jolt,
   root: THREE.Group,
@@ -93,58 +108,28 @@ const createShapeSettings = (
 ) => {
   const shapeSystem = new ShapeSystem(jolt);
   const normalizedShape = normalizeShape(shape);
-  const targetMesh = findFirstMesh(root);
 
   switch (normalizedShape) {
-    case "box": {
-      if (args.length >= 3) {
-        const halfExtent = new jolt.Vec3(args[0] / 2, args[1] / 2, args[2] / 2);
-        const shapeSettings = new jolt.BoxShapeSettings(
-          halfExtent,
-          CONVEX_RADIUS
-        );
-        jolt.destroy(halfExtent);
-        return shapeSettings;
-      }
+    case "box":
+      if (args.length >= 3) return shapeSystem.box(new THREE.Vector3(args[0], args[1], args[2]));
       break;
-    }
     case "sphere":
-      if (args.length >= 1) {
-        return new jolt.SphereShapeSettings(args[0]);
-      }
+      if (args.length >= 1) return new jolt.SphereShapeSettings(args[0]);
       break;
     case "capsule":
-      if (args.length >= 2) {
-        return new jolt.CapsuleShapeSettings(args[1] / 2, args[0]);
-      }
+      if (args.length >= 2) return new jolt.CapsuleShapeSettings(args[1] / 2, args[0]);
       break;
     case "cylinder":
-      if (args.length >= 2) {
-        return new jolt.CylinderShapeSettings(
-          args[1] / 2,
-          args[0],
-          CONVEX_RADIUS
-        );
-      }
-      break;
-    case "convex":
-    case "trimesh":
-      if (targetMesh) {
-        return shapeSystem.getShapeSettingsFromObject(targetMesh, normalizedShape);
-      }
-      break;
-    default:
+      if (args.length >= 2) return shapeSystem.cylinder(args[1] / 2, args[0]);
       break;
   }
 
-  if (targetMesh) {
-    return (
-      shapeSystem.getShapeSettingsFromGeometry(targetMesh.geometry, normalizedShape) ??
-      createDefaultBoxShape(jolt)
-    );
-  }
-
-  return createDefaultBoxShape(jolt);
+  const targetMesh = findFirstMesh(root);
+  if (!targetMesh) return shapeSystem.box(new THREE.Vector3(1, 1, 1));
+  // The mesh relative to the body, so child scale/offset reach convex and trimesh shapes.
+  root.updateWorldMatrix(true, true);
+  const meshToBody = new THREE.Matrix4().copy(root.matrixWorld).invert().multiply(targetMesh.matrixWorld);
+  return shapeSystem.getShapeSettingsFromObject(targetMesh, normalizedShape, meshToBody);
 };
 
 export const RigidBody: React.FC<RigidBodyProps> = ({
@@ -160,12 +145,23 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
   linearDamping,
   angularDamping,
   gravityFactor,
+  containedBy,
+  containmentRadius = 0,
+  initialLinearVelocity,
+  initialAngularVelocity,
+  onImpact,
+  impactThreshold = 1,
+  onBodyCreated,
   children,
 }) => {
-  const { jolt, bodyInterface } = useJolt();
+  if (!Number.isFinite(containmentRadius) || containmentRadius < 0) throw new Error("containmentRadius must be finite and nonnegative");
+  const world = useJolt();
+  const { jolt, bodyInterface, physicsSystem } = world;
   const groupRef = useRef<THREE.Group>(null);
   const bodyRef = useRef<Jolt.Body | null>(null);
   const bodyIdRef = useRef<Jolt.BodyID | null>(null);
+  const previousVelocity = useRef<THREE.Vector3 | null>(null);
+  const wasActive = useRef(true);
 
   const argsKey = JSON.stringify(args);
   const positionKey = position.join(",");
@@ -242,8 +238,21 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
     const bodyKey = bodyId.GetIndexAndSequenceNumber();
 
     bodyInterface.AddBody(bodyId, activationMode);
+    if (initialLinearVelocity && resolvedMotionType === jolt.EMotionType_Dynamic) {
+      const v = new jolt.Vec3(...initialLinearVelocity);
+      bodyInterface.SetLinearVelocity(bodyId, v);
+      jolt.destroy(v);
+    }
+    if (initialAngularVelocity && resolvedMotionType === jolt.EMotionType_Dynamic) {
+      const v = new jolt.Vec3(...initialAngularVelocity);
+      bodyInterface.SetAngularVelocity(bodyId, v);
+      jolt.destroy(v);
+    }
     bodyRef.current = body;
     bodyIdRef.current = bodyId;
+    onBodyCreated?.(body);
+    previousVelocity.current = null;
+    wasActive.current = true;
     syncGroupFromBody(body, groupRef.current);
 
     jolt.destroy(initialPosition);
@@ -254,6 +263,7 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
 
     return () => {
       if (
+        !world.alive ||
         !bodyIdRef.current ||
         bodyIdRef.current.GetIndexAndSequenceNumber() !== bodyKey
       ) {
@@ -262,6 +272,8 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
 
       bodyRef.current = null;
       bodyIdRef.current = null;
+      onBodyCreated?.(null);
+      previousVelocity.current = null;
       bodyInterface.RemoveBody(bodyId);
       bodyInterface.DestroyBody(bodyId);
     };
@@ -332,10 +344,63 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
     restitution,
   ]);
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     if (!bodyRef.current || !groupRef.current) return;
+    const container = containedBy?.current;
+    const body = bodyRef.current;
+    const bodyId = bodyIdRef.current;
+    const isActive = body.IsActive();
+    // Sleeping bodies don't move: sync once after they fall asleep, then skip.
+    // Contained items keep checking, because their container can move around them.
+    if (!isActive && !wasActive.current && !container) return;
+    wasActive.current = isActive;
+    if (onImpact && body.GetMotionType() === jolt.EMotionType_Dynamic) {
+      const v = body.GetLinearVelocity();
+      velocity.set(v.GetX(), v.GetY(), v.GetZ());
+      const previous = previousVelocity.current;
+      const inverseMass = body.GetMotionProperties().GetInverseMass();
+      if (previous && inverseMass > 0) {
+        const g = physicsSystem.GetGravity();
+        const impulse = gravity.set(g.GetX(), g.GetY(), g.GetZ())
+          .multiplyScalar(-delta).add(velocity).sub(previous)
+          .length() / inverseMass;
+        if (impulse >= impactThreshold) {
+          const p = body.GetPosition(), q = body.GetRotation(), w = body.GetAngularVelocity();
+          onImpact({
+            impulse,
+            position: [p.GetX(), p.GetY(), p.GetZ()],
+            rotation: [q.GetX(), q.GetY(), q.GetZ(), q.GetW()],
+            velocity: [velocity.x, velocity.y, velocity.z],
+            angularVelocity: [w.GetX(), w.GetY(), w.GetZ()],
+          });
+        }
+      }
+      previousVelocity.current = (previous ?? new THREE.Vector3()).copy(velocity);
+    }
+    if (container && bodyId && body.GetMotionType() === jolt.EMotionType_Dynamic) {
+      const p = body.GetPosition();
+      const constrained = containSphere(
+        container,
+        bodyPosition.set(p.GetX(), p.GetY(), p.GetZ()),
+        containmentRadius
+      );
+      if (constrained) {
+        const nextPosition = toJoltRVec3(jolt, constrained.position);
+        bodyInterface.SetPositionAndRotation(bodyId, nextPosition, body.GetRotation(), jolt.EActivation_Activate);
+        jolt.destroy(nextPosition);
+        const currentVelocity = body.GetLinearVelocity();
+        velocity.set(currentVelocity.GetX(), currentVelocity.GetY(), currentVelocity.GetZ());
+        const outwardSpeed = velocity.dot(constrained.inwardNormal);
+        if (outwardSpeed < 0) {
+          velocity.addScaledVector(constrained.inwardNormal, -(1 + (restitution ?? 0)) * outwardSpeed);
+          const nextVelocity = new jolt.Vec3(velocity.x, velocity.y, velocity.z);
+          bodyInterface.SetLinearVelocity(bodyId, nextVelocity);
+          jolt.destroy(nextVelocity);
+        }
+      }
+    }
     syncGroupFromBody(bodyRef.current, groupRef.current);
-  });
+  }, -25);
 
   return <group ref={groupRef}>{children}</group>;
 };

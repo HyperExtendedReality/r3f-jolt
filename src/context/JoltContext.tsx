@@ -9,6 +9,8 @@ export interface JoltContextValue {
   joltInterface: Jolt.JoltInterface;
   physicsSystem: Jolt.PhysicsSystem;
   bodyInterface: Jolt.BodyInterface;
+  /** False once the provider has destroyed the world; bodies must not touch Jolt after that. */
+  alive: boolean;
 }
 
 const JoltContext = createContext<JoltContextValue | null>(null);
@@ -31,6 +33,11 @@ export interface PhysicsProviderProps {
   /** Caps a rendered frame delta before it enters the accumulator. */
   maxDelta?: number;
   timeScale?: number;
+  /**
+   * Loads the Jolt module, e.g. `() => import("jolt-physics/wasm-multithread").then((m) => m.default())`.
+   * Defaults to `jolt-physics/wasm-compat`. The first provider to load Jolt decides the build.
+   */
+  init?: () => Promise<typeof Jolt>;
 }
 
 export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
@@ -41,6 +48,7 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
   maxSubSteps = 4,
   maxDelta = 0.1,
   timeScale = 1,
+  init,
 }) => {
   const [contextValue, setContextValue] = useState<JoltContextValue | null>(null);
   const worldRef = useRef<JoltContextValue | null>(null);
@@ -51,8 +59,8 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
     let joltInterface: Jolt.JoltInterface | null = null;
     let joltModule: typeof Jolt | null = null;
 
-    const init = async () => {
-      const Jolt = await getJolt();
+    const createWorld = async () => {
+      const Jolt = await getJolt(init);
       joltModule = Jolt;
       if (!active) return;
 
@@ -94,6 +102,7 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
         joltInterface,
         physicsSystem,
         bodyInterface,
+        alive: true,
       };
 
       if (!active) {
@@ -105,7 +114,7 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
       setContextValue(nextValue);
     };
 
-    void init();
+    void createWorld();
 
     return () => {
       active = false;
@@ -115,6 +124,8 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
       worldRef.current = null;
 
       if (world) {
+        // Parent effect cleanups run before children's, so bodies check this flag.
+        world.alive = false;
         world.jolt.destroy(world.joltInterface);
         return;
       }

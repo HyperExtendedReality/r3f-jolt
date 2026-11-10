@@ -1,4 +1,5 @@
 import { BufferGeometry, Vector3 } from "three";
+import { analyzeMeshTopology } from "./meshTopology";
 
 // Interface for the Jolt instance (using any because Jolt WASM types vary by implementation/version)
 type JoltInstance = any;
@@ -19,13 +20,22 @@ export class SoftBodyCreator {
     geometry: BufferGeometry,
     inVertexAttributes?: any,
     inBendType: number = Jolt.SoftBodySharedSettings_EBendType_Dihedral,
-    weldTolerance: number = 1.0e-5
+    weldTolerance: number = 1.0e-5,
+    inverseMass: number = 1
   ): any {
     const positions = geometry.getAttribute("position");
     const sourceIndices = geometry.getIndex();
 
-    if (!positions || positions.itemSize < 3) {
+    if (!positions || positions.itemSize < 3 || positions.count < 3) {
       throw new Error("SoftBody geometry requires a position attribute");
+    }
+    if (!Number.isFinite(weldTolerance) || weldTolerance <= 0) throw new Error("weldTolerance must be positive");
+    if ((sourceIndices?.count ?? positions.count) % 3 !== 0) throw new Error("SoftBody geometry must contain triangles");
+    for (let i = 0; i < positions.count; i += 1) {
+      if (!Number.isFinite(positions.getX(i) + positions.getY(i) + positions.getZ(i))) throw new Error("SoftBody positions must be finite");
+    }
+    if (sourceIndices) for (let i = 0; i < sourceIndices.count; i += 1) {
+      if (sourceIndices.getX(i) >= positions.count) throw new Error("SoftBody geometry index exceeds vertex count");
     }
 
     const sharedSettings = new Jolt.SoftBodySharedSettings();
@@ -53,7 +63,7 @@ export class SoftBodyCreator {
     }
 
     const vertex = new Jolt.SoftBodySharedSettingsVertex();
-    vertex.mInvMass = 1;
+    vertex.mInvMass = inverseMass;
     for (let i = 0; i < weldedPositions.length; i += 3) {
       vertex.mPosition.x = weldedPositions[i];
       vertex.mPosition.y = weldedPositions[i + 1];
@@ -68,6 +78,7 @@ export class SoftBodyCreator {
     const renderIndices = new RenderIndexArray(sourceIndexCount);
     const face = new Jolt.SoftBodySharedSettingsFace(0, 0, 0, 0);
     const physicsFaces = new Set<string>();
+    const physicsTriangles: number[] = [];
 
     for (let i = 0; i < sourceIndexCount; i += 3) {
       const renderA = sourceIndices?.getX(i) ?? i;
@@ -96,9 +107,13 @@ export class SoftBodyCreator {
       }
       physicsFaces.add(faceKey);
 
-      face.set_mVertex(0, physicsA);
-      face.set_mVertex(1, physicsB);
-      face.set_mVertex(2, physicsC);
+      physicsTriangles.push(physicsA, physicsB, physicsC);
+    }
+    const topology = analyzeMeshTopology(weldedPositions, physicsTriangles);
+    for (let i = 0; i < physicsTriangles.length; i += 3) {
+      face.set_mVertex(0, physicsTriangles[i]);
+      face.set_mVertex(1, physicsTriangles[i + (topology.signedVolume < 0 ? 2 : 1)]);
+      face.set_mVertex(2, physicsTriangles[i + (topology.signedVolume < 0 ? 1 : 2)]);
       sharedSettings.AddFace(face);
     }
     Jolt.destroy(face);
@@ -133,6 +148,7 @@ export class SoftBodyCreator {
       uvs,
       renderIndices,
       renderToPhysics,
+      closed: topology.closed,
     };
   }
 
@@ -178,8 +194,6 @@ export class SoftBodyCreator {
       return inX + inY * inGridSizeX;
     };
 
-    sharedSettings.CalculateEdgeLengths();
-
     // Create faces
     const f = new Jolt.SoftBodySharedSettingsFace(0, 0, 0, 0);
     for (let z = 0; z < inGridSizeZ - 1; ++z) {
@@ -208,6 +222,8 @@ export class SoftBodyCreator {
       Jolt.destroy(defaultAttributes);
     }
 
+    sharedSettings.CalculateEdgeLengths();
+
     // Optimize the settings
     sharedSettings.Optimize();
     
@@ -221,7 +237,7 @@ export class SoftBodyCreator {
       }
     }
 
-    return { settings: sharedSettings, uvs };
+    return { settings: sharedSettings, uvs, closed: false };
   }
 
   /**
@@ -259,7 +275,8 @@ export class SoftBodyCreator {
     inGridSize: number = 5,
     inGridSpacing: number = 0.5,
     edgeCompliance: number = 0,
-    volumeCompliance: number = 0
+    volumeCompliance: number = 0,
+    inverseMass: number = 1
   ): any {
     const cOffset = -0.5 * inGridSpacing * (inGridSize - 1);
 
@@ -273,6 +290,7 @@ export class SoftBodyCreator {
           v.mPosition.x = inGridSpacing * x + cOffset;
           v.mPosition.y = inGridSpacing * y + cOffset;
           v.mPosition.z = inGridSpacing * z + cOffset;
+          v.mInvMass = inverseMass;
           sharedSettings.mVertices.push_back(v);
         }
       }
@@ -455,7 +473,7 @@ export class SoftBodyCreator {
       }
     }
 
-    return { settings: sharedSettings, uvs };
+    return { settings: sharedSettings, uvs, closed: true };
   }
 
   /**
@@ -467,7 +485,8 @@ export class SoftBodyCreator {
     inNumTheta: number = 10,
     inNumPhi: number = 20,
     inBendType: number = Jolt.SoftBodySharedSettings_EBendType_None,
-    inVertexAttributes?: any
+    inVertexAttributes?: any,
+    inverseMass: number = 1
   ): any {
     const sharedSettings = new Jolt.SoftBodySharedSettings();
     const v3 = new Vector3();
@@ -482,6 +501,7 @@ export class SoftBodyCreator {
       v.mPosition.x = v3.x;
       v.mPosition.y = v3.y;
       v.mPosition.z = v3.z;
+      v.mInvMass = inverseMass;
       sharedSettings.mVertices.push_back(v);
     };
 
@@ -566,6 +586,6 @@ export class SoftBodyCreator {
         }
     }
 
-    return { settings: sharedSettings, uvs };
+    return { settings: sharedSettings, uvs, closed: true };
   }
 }

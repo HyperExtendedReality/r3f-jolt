@@ -5,17 +5,20 @@ import {
   OrbitControls,
   useGLTF,
 } from "@react-three/drei";
-import { Suspense, useEffect, useMemo } from "react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { PhysicsProvider } from "../context/JoltContext";
 import { RigidBody } from "../components/RigidBody";
 import { SoftBody } from "../components/SoftBody";
+import { BreakableBody } from "../components/BreakableBody";
 import { MetallicChipBagMaterial } from "../materials/MetallicChipBagMaterial";
 
 const laysChipsUrl = new URL("../assets/lays_chips.glb", import.meta.url).href;
 
 function LaysChipsSoftBody() {
   const gltf = useGLTF(laysChipsUrl);
+  const inflatedBag = useRef<THREE.Mesh>(null);
+  const sealedGeometry = useMemo(() => new THREE.SphereGeometry(1, 24, 16).scale(1.35, 2.1, 0.55), []);
   const { geometry, texture } = useMemo(() => {
     gltf.scene.updateWorldMatrix(true, true);
     let sourceMesh: THREE.Mesh | undefined;
@@ -55,21 +58,16 @@ function LaysChipsSoftBody() {
   }, [gltf.scene]);
 
   useEffect(() => () => geometry.dispose(), [geometry]);
+  useEffect(() => () => sealedGeometry.dispose(), [sealedGeometry]);
 
   return (
+    <>
     <SoftBody
       geometry={geometry}
-      position={[0, 12, 6]}
-      pressure={40}
-      iterations={12}
-      friction={0.8}
+      position={[-3, 12, 6]}
+      physicsMaterial="chipBagDeflated"
       doubleSided
       castShadow
-      config={{
-        compliance: 2.0e-5,
-        shearCompliance: 2.0e-5,
-        bendCompliance: 5.0e-4,
-      }}
     >
       <MetallicChipBagMaterial
         map={texture}
@@ -78,12 +76,42 @@ function LaysChipsSoftBody() {
         roughnessVariation={0.18}
       />
     </SoftBody>
+    <SoftBody
+      ref={inflatedBag}
+      geometry={sealedGeometry}
+      position={[3, 12, 6]}
+      physicsMaterial="chipBagInflated"
+      castShadow
+    >
+      <MetallicChipBagMaterial map={texture} crinkleScale={15} crinkleStrength={0.06} />
+    </SoftBody>
+    {Array.from({ length: 5 }, (_, i) => (
+      <RigidBody
+        key={i}
+        type="Sphere"
+        args={[0.17]}
+        position={[3 + (i - 2) * 0.22, 12 + i * 0.17, 6]}
+        containedBy={inflatedBag}
+        containmentRadius={0.17}
+        mass={0.02}
+        friction={0.65}
+      >
+        <mesh castShadow>
+          <sphereGeometry args={[0.17, 8, 6]} />
+          <meshStandardMaterial color="#f0c75a" roughness={0.85} />
+        </mesh>
+      </RigidBody>
+    ))}
+    </>
   );
 }
 
 useGLTF.preload(laysChipsUrl);
 
 export default function App() {
+  const breakableGeometry = useMemo(() => new THREE.BoxGeometry(1.5, 1.5, 1.5), []);
+  const breakableMaterial = useMemo(() => new THREE.MeshStandardMaterial({ color: "#f6ad55" }), []);
+  useEffect(() => () => { breakableGeometry.dispose(); breakableMaterial.dispose(); }, [breakableGeometry, breakableMaterial]);
   return (
     <Canvas
       shadows
@@ -130,25 +158,20 @@ export default function App() {
           </mesh>
         </RigidBody>
 
-        <RigidBody
-          type="Box"
-          args={[1.5, 1.5, 1.5]}
+        <BreakableBody
+          geometry={breakableGeometry}
           position={[0, 14, 2]}
           restitution={0.2}
           friction={0.7}
-        >
-          <mesh castShadow>
-            <boxGeometry args={[1.5, 1.5, 1.5]} />
-            <meshStandardMaterial color="#f6ad55" />
-          </mesh>
-        </RigidBody>
+          material={breakableMaterial}
+          breakingImpulse={8}
+        />
 
         <SoftBody
           type="Sphere"
           position={[-7, 10, 0]}
+          physicsMaterial="bouncySlime"
           pressure={1400}
-          iterations={12}
-          friction={0.6}
           config={{ radius: 2, numTheta: 12, numPhi: 24 }}
         >
           <meshPhysicalMaterial
@@ -179,13 +202,10 @@ export default function App() {
         <SoftBody
           type="Cube"
           position={[0, 18, -6]}
-          pressure={2}
-          iterations={10}
+          physicsMaterial="slime"
           config={{
             gridSize: 6,
             gridSpacing: 0.35,
-            edgeCompliance: 1.0e-6,
-            volumeCompliance: 1.0e-7,
           }}
           color="#a3ff99"
         />

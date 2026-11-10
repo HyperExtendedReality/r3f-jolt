@@ -1,16 +1,12 @@
-import initJolt from 'jolt-physics/wasm-compat';
 import type Jolt from 'jolt-physics';
 
-let joltInstance: typeof Jolt | null = null;
 let joltPromise: Promise<typeof Jolt> | null = null;
 
-export const getJolt = async () => {
-  if (joltInstance) return joltInstance;
-  if (!joltPromise) {
-    joltPromise = initJolt().then((module: typeof Jolt) => {
-      joltInstance = module;
-      return module;
-    });
-  }
+/**
+ * Loads Jolt once. The first caller's `init` wins; later calls share that module.
+ * Defaults to the self-contained `jolt-physics/wasm-compat` build.
+ */
+export const getJolt = (init?: () => Promise<typeof Jolt>) => {
+  joltPromise ??= (init ?? (async () => (await import('jolt-physics/wasm-compat')).default()))();
   return joltPromise;
 };
