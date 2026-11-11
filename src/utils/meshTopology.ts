@@ -1,4 +1,8 @@
-/** Checks a welded triangle surface for a consistently oriented, sealed shell. */
+/**
+ * Checks a welded triangle surface for a consistently oriented, sealed shell: every directed
+ * edge is matched by as many reverse edges. Pinched (non-manifold) seams, where two sheets of a
+ * bag meet along one edge, still enclose a well-defined volume and pass.
+ */
 export function analyzeMeshTopology(positions: ArrayLike<number>, triangles: ArrayLike<number>) {
   const edges = new Map<string, number>();
   let sixTimesVolume = 0;
@@ -16,7 +20,7 @@ export function analyzeMeshTopology(positions: ArrayLike<number>, triangles: Arr
   }
   const closed = triangles.length >= 12 && [...edges].every(([key, count]) => {
     const [a, b] = key.split(",");
-    return count === 1 && edges.get(`${b},${a}`) === 1;
+    return edges.get(`${b},${a}`) === count;
   });
   return { closed: closed && Math.abs(sixTimesVolume) > 1e-12, signedVolume: sixTimesVolume / 6 };
 }

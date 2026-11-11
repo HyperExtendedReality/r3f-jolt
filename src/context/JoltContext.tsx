@@ -3,6 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import { getJolt } from "../utils/joltLoader";
 import type Jolt from "jolt-physics";
 import { LAYER_MOVING, LAYER_NON_MOVING, toJoltVec3 } from "../utils/joltUtils";
+import { collideSoftBodies, type SoftSurface, type StepClock } from "../utils/softBodyCollision";
 
 export interface JoltContextValue {
   jolt: typeof Jolt;
@@ -11,6 +12,10 @@ export interface JoltContextValue {
   bodyInterface: Jolt.BodyInterface;
   /** False once the provider has destroyed the world; bodies must not touch Jolt after that. */
   alive: boolean;
+  /** Fixed-step counter and render interpolation factor, updated before bodies sync. */
+  clock: StepClock;
+  /** Soft bodies taking part in soft-vs-soft collision. */
+  softSurfaces: Set<SoftSurface>;
 }
 
 const JoltContext = createContext<JoltContextValue | null>(null);
@@ -38,6 +43,12 @@ export interface PhysicsProviderProps {
    * Defaults to `jolt-physics/wasm-compat`. The first provider to load Jolt decides the build.
    */
   init?: () => Promise<typeof Jolt>;
+  /** Draw bodies between the last two fixed steps for smooth motion at any frame rate. Default true. */
+  interpolate?: boolean;
+  /** Collide soft bodies with each other (Jolt does not). Default true. */
+  softBodyCollisions?: boolean;
+  /** Minimum separation kept between colliding soft bodies, in metres. Default 0.02. */
+  softBodyThickness?: number;
 }
 
 export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
@@ -49,6 +60,9 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
   maxDelta = 0.1,
   timeScale = 1,
   init,
+  interpolate = true,
+  softBodyCollisions = true,
+  softBodyThickness = 0.02,
 }) => {
   const [contextValue, setContextValue] = useState<JoltContextValue | null>(null);
   const worldRef = useRef<JoltContextValue | null>(null);
@@ -103,6 +117,8 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
         physicsSystem,
         bodyInterface,
         alive: true,
+        clock: { count: 0, alpha: 1 },
+        softSurfaces: new Set(),
       };
 
       if (!active) {
@@ -150,7 +166,11 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
 
   useFrame((_, delta) => {
     const world = worldRef.current;
-    if (!world || paused) return;
+    if (!world) return;
+    if (paused) {
+      world.clock.alpha = 1;
+      return;
+    }
 
     const fixedTimeStep = Math.max(1 / 240, timeStep);
     const stepLimit = Math.max(1, Math.floor(maxSubSteps));
@@ -164,19 +184,20 @@ export const PhysicsProvider: React.FC<PhysicsProviderProps> = ({
       stepLimit
     );
 
-    if (numSteps === 0) {
-      accumulatorRef.current = accumulated;
-      return;
-    }
-
     accumulatorRef.current = accumulated - numSteps * fixedTimeStep;
     if (numSteps === stepLimit && accumulatorRef.current >= fixedTimeStep) {
       accumulatorRef.current %= fixedTimeStep;
     }
 
-    // Jolt subdivides this interval internally, keeping the JS/WASM boundary
-    // to one call per rendered frame even when catching up.
-    world.joltInterface.Step(fixedTimeStep * numSteps, numSteps);
+    const collide = softBodyCollisions && world.softSurfaces.size > 1;
+    for (let i = 0; i < numSteps; i += 1) {
+      world.joltInterface.Step(fixedTimeStep, 1);
+      world.clock.count += 1;
+      if (collide) {
+        collideSoftBodies(world.jolt, world.bodyInterface, world.softSurfaces, softBodyThickness);
+      }
+    }
+    world.clock.alpha = interpolate ? accumulatorRef.current / fixedTimeStep : 1;
   }, -100);
 
   if (!contextValue) return null;

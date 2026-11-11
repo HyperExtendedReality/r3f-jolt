@@ -13,3 +13,5 @@ export * from './utils/containment';
 export * from './utils/tearSurface';
 export * from './utils/joltUtils';
 
+export * from './utils/surfaceIndex';
+export * from './utils/softBodyCollision';

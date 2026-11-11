@@ -6,6 +6,8 @@ import { SoftBodyCreator } from "../utils/SoftBodyCreator";
 import { toJoltQuat, toJoltRVec3, LAYER_MOVING } from "../utils/joltUtils";
 import type Jolt from "jolt-physics";
 import { softBodyMaterials, type SoftBodyPhysicsMaterial } from "../materials/SoftBodyPhysicsMaterial";
+import { SoftSurface, type StepClock } from "../utils/softBodyCollision";
+import { registerSurface, unregisterSurface } from "../utils/surfaceIndex";
 
 type SoftBodyType = "Sphere" | "Cloth" | "Cube";
 
@@ -68,9 +70,8 @@ export interface SoftBodyProps extends SoftBodyMeshProps {
   /** A Three.js material, including ShaderMaterial and custom materials. */
   material?: THREE.Material;
   /**
-   * Rebuild smooth vertex normals on the CPU after each deformation update.
-   * Disable this for flat-shaded or derivative-normal shaders to reduce CPU
-   * work and GPU uploads on dense soft bodies.
+   * Rebuild smooth vertex normals once per fixed step. By default this happens only when the
+   * material reads normals (not for MeshBasicMaterial, flatShading, or shaders that ignore them).
    */
   updateNormals?: boolean;
   children?: React.ReactNode;
@@ -90,13 +91,16 @@ interface SoftBodyRuntime {
   body: Jolt.Body;
   bodyId: Jolt.BodyID;
   motionProperties: Jolt.SoftBodyMotionProperties;
+  surface: SoftSurface;
   positionAttribute: THREE.BufferAttribute;
   positionValues: Float32Array;
-  normalAttribute: THREE.BufferAttribute | null;
-  normalValues: Float32Array | null;
+  normalAttribute: THREE.BufferAttribute;
+  normalValues: Float32Array;
   indexValues: Uint16Array | Uint32Array;
-  triangleOffsets: Uint32Array | null;
-  heapFloatIndices: Uint32Array;
+  /** Physics vertex for each render vertex; null when they are the same. */
+  renderToPhysics: Uint32Array | null;
+  /** Surface revision the normals were last built from; -1 forces a rebuild. */
+  normalRevision: number;
   wasActive: boolean;
 }
 
@@ -359,48 +363,26 @@ const buildSoftBodyRuntime = (
   body: Jolt.Body,
   geometry: THREE.BufferGeometry,
   creationData: SoftBodyCreationData,
-  updateNormals: boolean
+  clock: StepClock
 ): SoftBodyRuntime => {
   const motionProperties = jolt.castObject(
     body.GetMotionProperties(),
     jolt.SoftBodyMotionProperties
   );
-  const vertices = motionProperties.GetVertices();
-  const settings = motionProperties.GetSettings();
-  const faces = settings.mFaces;
-  const renderVertexCount =
-    creationData.renderToPhysics?.length ?? vertices.size();
+  const surface = new SoftSurface(jolt, body, motionProperties, clock);
+  const renderToPhysics = creationData.renderToPhysics ?? null;
+  const renderVertexCount = renderToPhysics?.length ?? surface.vertexCount;
   const positionValues = new Float32Array(renderVertexCount * 3);
   const positionAttribute = new THREE.BufferAttribute(positionValues, 3);
-  const normalValues = updateNormals
-    ? new Float32Array(positionValues.length)
-    : null;
-  const normalAttribute = normalValues
-    ? new THREE.BufferAttribute(normalValues, 3)
-    : null;
+  const normalValues = new Float32Array(positionValues.length);
+  const normalAttribute = new THREE.BufferAttribute(normalValues, 3);
   const IndexArray = renderVertexCount > 65_535 ? Uint32Array : Uint16Array;
-  const indexValues = creationData.renderIndices
-    ? new IndexArray(creationData.renderIndices)
-    : new IndexArray(faces.size() * 3);
+  const indexValues = new IndexArray(creationData.renderIndices ?? surface.index.indices);
 
   positionAttribute.setUsage(THREE.DynamicDrawUsage);
-  normalAttribute?.setUsage(THREE.DynamicDrawUsage);
-
-  if (!creationData.renderIndices) {
-    for (let i = 0; i < faces.size(); i += 1) {
-      const face = faces.at(i);
-      indexValues[i * 3] = face.get_mVertex(0);
-      indexValues[i * 3 + 1] = face.get_mVertex(1);
-      indexValues[i * 3 + 2] = face.get_mVertex(2);
-    }
-  }
-
+  normalAttribute.setUsage(THREE.DynamicDrawUsage);
   geometry.setAttribute("position", positionAttribute);
-  if (normalAttribute) {
-    geometry.setAttribute("normal", normalAttribute);
-  } else {
-    geometry.deleteAttribute("normal");
-  }
+  geometry.setAttribute("normal", normalAttribute);
   geometry.setIndex(new THREE.BufferAttribute(indexValues, 1));
 
   if (creationData.uvs) {
@@ -412,121 +394,70 @@ const buildSoftBodyRuntime = (
     geometry.deleteAttribute("uv");
   }
 
-  const positionOffsetBytes = jolt.SoftBodyVertexTraits.prototype.mPositionOffset;
-  const heapFloatIndices = new Uint32Array(renderVertexCount);
-  const triangleOffsets = updateNormals
-    ? new Uint32Array(indexValues.length)
-    : null;
-
-  for (let i = 0; i < heapFloatIndices.length; i += 1) {
-    const physicsIndex = creationData.renderToPhysics?.[i] ?? i;
-    heapFloatIndices[i] =
-      (jolt.getPointer(vertices.at(physicsIndex)) + positionOffsetBytes) >>> 2;
-  }
-
-  if (triangleOffsets) {
-    for (let i = 0; i < indexValues.length; i += 1) {
-      triangleOffsets[i] = indexValues[i] * 3;
-    }
-  }
-
   const runtime: SoftBodyRuntime = {
     settings: creationData.settings,
     closed: creationData.closed,
     body,
     bodyId: body.GetID(),
     motionProperties,
+    surface,
     positionAttribute,
     positionValues,
     normalAttribute,
     normalValues,
     indexValues,
-    triangleOffsets,
-    heapFloatIndices,
+    renderToPhysics,
+    normalRevision: -1,
     wasActive: true,
   };
 
-  updateSoftBodyBuffers(jolt, runtime);
+  updateSoftBodyBuffers(runtime, 1, true);
   geometry.computeBoundingSphere();
 
   return runtime;
 };
 
+/** Whether a material reads vertex normals; unlit and flat-shaded ones do not. */
+const materialUsesNormals = (material: THREE.Material | THREE.Material[]): boolean =>
+  (Array.isArray(material) ? material : [material]).some((item) => {
+    if (item instanceof THREE.MeshBasicMaterial || (item as { flatShading?: boolean }).flatShading) return false;
+    if (item instanceof THREE.ShaderMaterial && !item.lights) return /\bnormal\b/.test(item.vertexShader);
+    return true;
+  });
+
+/** Blend the last two fixed-step vertex sets into the render buffers. */
 const updateSoftBodyBuffers = (
-  jolt: typeof Jolt,
-  runtime: SoftBodyRuntime
-) => {
-  const heap = jolt.HEAPF32;
-  const positions = runtime.positionValues;
-  const heapIndices = runtime.heapFloatIndices;
-
-  for (let i = 0, target = 0; i < heapIndices.length; i += 1, target += 3) {
-    const source = heapIndices[i];
-    positions[target] = heap[source];
-    positions[target + 1] = heap[source + 1];
-    positions[target + 2] = heap[source + 2];
-  }
-
-  const normals = runtime.normalValues;
-  const indices = runtime.triangleOffsets;
-  if (!normals || !indices || !runtime.normalAttribute) {
-    runtime.positionAttribute.needsUpdate = true;
-    return;
-  }
-
-  normals.fill(0);
-
-  for (let i = 0; i < indices.length; i += 3) {
-    const a = indices[i];
-    const b = indices[i + 1];
-    const c = indices[i + 2];
-    const abX = positions[a] - positions[b];
-    const abY = positions[a + 1] - positions[b + 1];
-    const abZ = positions[a + 2] - positions[b + 2];
-    const cbX = positions[c] - positions[b];
-    const cbY = positions[c + 1] - positions[b + 1];
-    const cbZ = positions[c + 2] - positions[b + 2];
-    const normalX = cbY * abZ - cbZ * abY;
-    const normalY = cbZ * abX - cbX * abZ;
-    const normalZ = cbX * abY - cbY * abX;
-
-    normals[a] += normalX;
-    normals[a + 1] += normalY;
-    normals[a + 2] += normalZ;
-    normals[b] += normalX;
-    normals[b + 1] += normalY;
-    normals[b + 2] += normalZ;
-    normals[c] += normalX;
-    normals[c + 1] += normalY;
-    normals[c + 2] += normalZ;
-  }
-
-  for (let i = 0; i < normals.length; i += 3) {
-    const x = normals[i];
-    const y = normals[i + 1];
-    const z = normals[i + 2];
-    const lengthSquared = x * x + y * y + z * z;
-
-    if (lengthSquared > 0) {
-      const inverseLength = 1 / Math.sqrt(lengthSquared);
-      normals[i] = x * inverseLength;
-      normals[i + 1] = y * inverseLength;
-      normals[i + 2] = z * inverseLength;
-    }
-  }
-
-  runtime.positionAttribute.needsUpdate = true;
-  runtime.normalAttribute.needsUpdate = true;
-};
-
-const syncSoftBodyMesh = (
-  jolt: typeof Jolt,
   runtime: SoftBodyRuntime,
-  mesh: THREE.Mesh
+  alpha: number,
+  wantNormals: boolean
 ) => {
-  updateSoftBodyBuffers(jolt, runtime);
+  const current = runtime.surface.index.positions;
+  const previous = runtime.surface.previous;
+  const positions = runtime.positionValues;
+  const map = runtime.renderToPhysics;
+  const vertexCount = positions.length / 3;
 
-  syncMeshTransform(runtime.body, mesh);
+  for (let i = 0, target = 0; i < vertexCount; i += 1, target += 3) {
+    const source = (map ? map[i] : i) * 3;
+    positions[target] = previous[source] + (current[source] - previous[source]) * alpha;
+    positions[target + 1] = previous[source + 1] + (current[source + 1] - previous[source + 1]) * alpha;
+    positions[target + 2] = previous[source + 2] + (current[source + 2] - previous[source + 2]) * alpha;
+  }
+  runtime.positionAttribute.needsUpdate = true;
+
+  // Normals change only when the physics vertices do, so rebuild them once per fixed step.
+  if (!wantNormals || runtime.normalRevision === runtime.surface.revision) return;
+  runtime.normalRevision = runtime.surface.revision;
+  runtime.surface.index.ensureNormals();
+  const vertexNormals = runtime.surface.index.vertexNormals;
+  const normals = runtime.normalValues;
+  for (let i = 0, target = 0; i < vertexCount; i += 1, target += 3) {
+    const source = (map ? map[i] : i) * 3;
+    normals[target] = vertexNormals[source];
+    normals[target + 1] = vertexNormals[source + 1];
+    normals[target + 2] = vertexNormals[source + 2];
+  }
+  runtime.normalAttribute.needsUpdate = true;
 };
 
 const SoftBodyImpl = (
@@ -551,7 +482,7 @@ const SoftBodyImpl = (
   texture,
   textureColorSpace = THREE.SRGBColorSpace,
   material,
-  updateNormals = true,
+  updateNormals,
   children,
   frustumCulled = false,
   ...meshProps
@@ -559,7 +490,7 @@ const SoftBodyImpl = (
   forwardedRef: React.ForwardedRef<THREE.Mesh>
 ) => {
   const world = useJolt();
-  const { jolt, bodyInterface } = world;
+  const { jolt, bodyInterface, clock, softSurfaces } = world;
   const meshRef = useRef<THREE.Mesh>(null);
   const [renderGeometry] = useState(() => new THREE.BufferGeometry());
   const runtimeRef = useRef<SoftBodyRuntime | null>(null);
@@ -611,10 +542,14 @@ const SoftBodyImpl = (
   useEffect(() => {
     validateSoftBody(resolvedConfig, resolvedPressure, resolvedIterations);
     const creationData = createSoftBodyData(jolt, type, resolvedConfig, geometry);
-    if (resolvedPressure > 0 && !creationData.closed) {
-      jolt.destroy(creationData.settings);
-      throw new Error("SoftBody pressure requires a sealed, consistently oriented triangle mesh");
-    }
+    const pressureFor = (closed: boolean) => {
+      if (resolvedPressure > 0 && !closed) {
+        // Logged, not thrown: a throw in an effect would unmount the whole canvas.
+        console.error("[r3f-jolt] SoftBody pressure requires a sealed, consistently oriented triangle mesh; simulating without pressure.");
+        return 0;
+      }
+      return resolvedPressure;
+    };
     const initialPosition = toJoltRVec3(jolt, position);
     const initialRotation = toJoltQuat(jolt, rotation);
     const creationSettings = new jolt.SoftBodyCreationSettings(
@@ -624,7 +559,7 @@ const SoftBodyImpl = (
       LAYER_MOVING
     );
 
-    creationSettings.mPressure = resolvedPressure;
+    creationSettings.mPressure = pressureFor(creationData.closed);
     creationSettings.mUpdatePosition = false;
     creationSettings.mFacesDoubleSided =
       doubleSided ?? (type === "Cloth" || Boolean(geometry));
@@ -661,7 +596,7 @@ const SoftBodyImpl = (
       body,
       renderGeometry,
       creationData,
-      updateNormals
+      clock
     );
     if (initialLinearVelocity) {
       const vertices = runtime.motionProperties.GetVertices();
@@ -673,10 +608,17 @@ const SoftBodyImpl = (
 
     bodyInterface.AddBody(bodyId, jolt.EActivation_Activate);
     runtimeRef.current = runtime;
+    softSurfaces.add(runtime.surface);
     onBodyCreated?.(body);
 
-    if (meshRef.current) {
-      syncSoftBodyMesh(jolt, runtime, meshRef.current);
+    const mesh = meshRef.current;
+    if (mesh) {
+      syncMeshTransform(body, mesh);
+      // Containment queries read the physics vertices, not the interpolated render ones.
+      registerSurface(mesh, () => {
+        runtime.surface.sync();
+        return runtime.surface.index;
+      });
     }
 
     jolt.destroy(initialPosition);
@@ -684,6 +626,8 @@ const SoftBodyImpl = (
     jolt.destroy(creationSettings);
 
     return () => {
+      softSurfaces.delete(runtime.surface);
+      if (mesh) unregisterSurface(mesh);
       if (
         !world.alive ||
         !runtimeRef.current ||
@@ -708,7 +652,6 @@ const SoftBodyImpl = (
     initialLinearVelocity?.join(","),
     jolt,
     type,
-    updateNormals,
   ]);
 
   useEffect(() => {
@@ -726,7 +669,7 @@ const SoftBodyImpl = (
     );
 
     if (meshRef.current) {
-      syncSoftBodyMesh(jolt, runtime, meshRef.current);
+      syncMeshTransform(runtime.body, meshRef.current);
     }
 
     jolt.destroy(nextPosition);
@@ -738,9 +681,9 @@ const SoftBodyImpl = (
     if (!runtime) return;
 
     validateSoftBody(resolvedConfig, resolvedPressure, resolvedIterations);
-    if (resolvedPressure > 0 && !runtime.closed) throw new Error("SoftBody pressure requires a sealed, consistently oriented triangle mesh");
+    if (resolvedPressure > 0 && !runtime.closed) console.error("[r3f-jolt] SoftBody pressure requires a sealed, consistently oriented triangle mesh; simulating without pressure.");
 
-    runtime.motionProperties.SetPressure(resolvedPressure);
+    runtime.motionProperties.SetPressure(runtime.closed ? resolvedPressure : 0);
     runtime.motionProperties.SetUpdatePosition(false);
 
     if (resolvedIterations != null) {
@@ -791,7 +734,15 @@ const SoftBodyImpl = (
     if (!isActive && !runtime.wasActive) return;
     runtime.wasActive = isActive;
 
-    syncSoftBodyMesh(jolt, runtime, mesh);
+    runtime.surface.sync();
+    // Asleep: settle on the final pose so the skipped frames show no half-blend.
+    if (!isActive) runtime.surface.previous.set(runtime.surface.index.positions);
+    updateSoftBodyBuffers(
+      runtime,
+      clock.alpha,
+      updateNormals ?? materialUsesNormals(mesh.material)
+    );
+    syncMeshTransform(runtime.body, mesh);
   }, -50);
 
   const materialColor = color ?? (texture ? "white" : "hotpink");

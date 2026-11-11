@@ -18,7 +18,15 @@ const laysChipsUrl = new URL("../assets/lays_chips.glb", import.meta.url).href;
 function LaysChipsSoftBody() {
   const gltf = useGLTF(laysChipsUrl);
   const inflatedBag = useRef<THREE.Mesh>(null);
-  const sealedGeometry = useMemo(() => new THREE.SphereGeometry(1, 24, 16).scale(1.35, 2.1, 0.55), []);
+  const chipGeometry = useMemo(() => {
+    // A potato chip: a thin disc bent into a saddle.
+    const disc = new THREE.CircleGeometry(0.16, 14);
+    const p = disc.getAttribute("position");
+    for (let i = 0; i < p.count; i += 1) p.setZ(i, 2.2 * (p.getX(i) ** 2 - p.getY(i) ** 2));
+    disc.computeVertexNormals();
+    return disc;
+  }, []);
+  useEffect(() => () => chipGeometry.dispose(), [chipGeometry]);
   const { geometry, texture } = useMemo(() => {
     gltf.scene.updateWorldMatrix(true, true);
     let sourceMesh: THREE.Mesh | undefined;
@@ -58,7 +66,6 @@ function LaysChipsSoftBody() {
   }, [gltf.scene]);
 
   useEffect(() => () => geometry.dispose(), [geometry]);
-  useEffect(() => () => sealedGeometry.dispose(), [sealedGeometry]);
 
   return (
     <>
@@ -69,36 +76,30 @@ function LaysChipsSoftBody() {
       doubleSided
       castShadow
     >
-      <MetallicChipBagMaterial
-        map={texture}
-        crinkleScale={15}
-        crinkleStrength={0.06}
-        roughnessVariation={0.18}
-      />
+      <MetallicChipBagMaterial map={texture} />
     </SoftBody>
     <SoftBody
       ref={inflatedBag}
-      geometry={sealedGeometry}
+      geometry={geometry}
       position={[3, 12, 6]}
       physicsMaterial="chipBagInflated"
       castShadow
     >
-      <MetallicChipBagMaterial map={texture} crinkleScale={15} crinkleStrength={0.06} />
+      <MetallicChipBagMaterial map={texture} />
     </SoftBody>
     {Array.from({ length: 5 }, (_, i) => (
       <RigidBody
         key={i}
-        type="Sphere"
-        args={[0.17]}
+        shape="convex"
         position={[3 + (i - 2) * 0.22, 12 + i * 0.17, 6]}
+        rotation={new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.sin(i * 1.7), i, Math.cos(i * 2.3))).toArray() as [number, number, number, number]}
         containedBy={inflatedBag}
         containmentRadius={0.17}
-        mass={0.02}
+        mass={0.004}
         friction={0.65}
       >
-        <mesh castShadow>
-          <sphereGeometry args={[0.17, 8, 6]} />
-          <meshStandardMaterial color="#f0c75a" roughness={0.85} />
+        <mesh castShadow geometry={chipGeometry}>
+          <meshStandardMaterial color="#e9b949" roughness={0.6} side={THREE.DoubleSide} />
         </mesh>
       </RigidBody>
     ))}
@@ -128,6 +129,8 @@ export default function App() {
         shadow-mapSize-height={2048}
       />
       <Environment resolution={256}>
+        {/* A neutral studio dome; without it, mirror-like foil reflects black and looks dark. */}
+        <color attach="background" args={["#6b7079"]} />
         <Lightformer
           form="rect"
           intensity={3.5}
@@ -142,6 +145,10 @@ export default function App() {
           rotation={[0, Math.PI / 2, 0]}
           scale={5}
         />
+        {/* Softbox ceiling and side strips: foil is a mirror, so it needs something to reflect. */}
+        <Lightformer form="rect" intensity={1.5} position={[0, 14, 0]} rotation={[Math.PI / 2, 0, 0]} scale={[30, 30, 1]} />
+        <Lightformer form="rect" intensity={2.5} position={[10, 5, 0]} rotation={[0, -Math.PI / 2, 0]} scale={[3, 14, 1]} />
+        <Lightformer form="rect" color="#cfe3ff" intensity={1.2} position={[0, 4, 14]} rotation={[0, Math.PI, 0]} scale={[16, 4, 1]} />
       </Environment>
 
       <PhysicsProvider gravity={[0, -9.81, 0]}>

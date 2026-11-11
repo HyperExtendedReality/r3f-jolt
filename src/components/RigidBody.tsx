@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useJolt } from "../context/JoltContext";
@@ -66,17 +66,37 @@ const findFirstMesh = (root: THREE.Object3D): THREE.Mesh | null => {
   return mesh;
 };
 
-const syncGroupFromBody = (body: Jolt.Body, group: THREE.Group) => {
-  const position = body.GetPosition();
-  const rotation = body.GetRotation();
+/** Body pose at the last two fixed steps, for render interpolation. */
+interface Pose {
+  previousPosition: THREE.Vector3;
+  previousRotation: THREE.Quaternion;
+  position: THREE.Vector3;
+  rotation: THREE.Quaternion;
+  step: number;
+}
 
-  group.position.set(position.GetX(), position.GetY(), position.GetZ());
-  group.quaternion.set(
-    rotation.GetX(),
-    rotation.GetY(),
-    rotation.GetZ(),
-    rotation.GetW()
-  );
+const createPose = (): Pose => ({
+  previousPosition: new THREE.Vector3(),
+  previousRotation: new THREE.Quaternion(),
+  position: new THREE.Vector3(),
+  rotation: new THREE.Quaternion(),
+  step: -1,
+});
+
+const readPose = (body: Jolt.Body, pose: Pose) => {
+  const p = body.GetPosition(), q = body.GetRotation();
+  pose.position.set(p.GetX(), p.GetY(), p.GetZ());
+  pose.rotation.set(q.GetX(), q.GetY(), q.GetZ(), q.GetW());
+};
+
+/** Jump to the body's pose with no blend, e.g. after creation or a teleport. */
+const snapPose = (body: Jolt.Body, pose: Pose, group: THREE.Group, step: number) => {
+  readPose(body, pose);
+  pose.previousPosition.copy(pose.position);
+  pose.previousRotation.copy(pose.rotation);
+  pose.step = step;
+  group.position.copy(pose.position);
+  group.quaternion.copy(pose.rotation);
 };
 
 const normalizeShape = (
@@ -156,12 +176,13 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
 }) => {
   if (!Number.isFinite(containmentRadius) || containmentRadius < 0) throw new Error("containmentRadius must be finite and nonnegative");
   const world = useJolt();
-  const { jolt, bodyInterface, physicsSystem } = world;
+  const { jolt, bodyInterface, physicsSystem, clock } = world;
   const groupRef = useRef<THREE.Group>(null);
   const bodyRef = useRef<Jolt.Body | null>(null);
   const bodyIdRef = useRef<Jolt.BodyID | null>(null);
   const previousVelocity = useRef<THREE.Vector3 | null>(null);
   const wasActive = useRef(true);
+  const [pose] = useState(createPose);
 
   const argsKey = JSON.stringify(args);
   const positionKey = position.join(",");
@@ -253,7 +274,7 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
     onBodyCreated?.(body);
     previousVelocity.current = null;
     wasActive.current = true;
-    syncGroupFromBody(body, groupRef.current);
+    snapPose(body, pose, groupRef.current, clock.count);
 
     jolt.destroy(initialPosition);
     jolt.destroy(initialRotation);
@@ -299,7 +320,7 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
     );
 
     if (groupRef.current) {
-      syncGroupFromBody(body, groupRef.current);
+      snapPose(body, pose, groupRef.current, clock.count);
     }
 
     jolt.destroy(nextPosition);
@@ -353,6 +374,7 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
     // Sleeping bodies don't move: sync once after they fall asleep, then skip.
     // Contained items keep checking, because their container can move around them.
     if (!isActive && !wasActive.current && !container) return;
+    const fellAsleep = !isActive && wasActive.current;
     wasActive.current = isActive;
     if (onImpact && body.GetMotionType() === jolt.EMotionType_Dynamic) {
       const v = body.GetLinearVelocity();
@@ -399,7 +421,20 @@ export const RigidBody: React.FC<RigidBodyProps> = ({
         }
       }
     }
-    syncGroupFromBody(bodyRef.current, groupRef.current);
+    if (pose.step !== clock.count) {
+      pose.previousPosition.copy(pose.position);
+      pose.previousRotation.copy(pose.rotation);
+      pose.step = clock.count;
+    }
+    readPose(body, pose);
+    if (fellAsleep) {
+      pose.previousPosition.copy(pose.position);
+      pose.previousRotation.copy(pose.rotation);
+    }
+    // shortcut: when one frame runs several fixed steps, the blend starts from the pose two or
+    // more steps back; only visible while the frame rate is far below the step rate.
+    groupRef.current.position.lerpVectors(pose.previousPosition, pose.position, clock.alpha);
+    groupRef.current.quaternion.slerpQuaternions(pose.previousRotation, pose.rotation, clock.alpha);
   }, -25);
 
   return <group ref={groupRef}>{children}</group>;

@@ -1,6 +1,12 @@
 import { BufferGeometry, Vector3 } from "three";
 import { analyzeMeshTopology } from "./meshTopology";
 
+/** Whether triangle (a, b, c) has the opposite winding of the one stored at `start`. */
+const isReversed = (triangles: number[], start: number, a: number, b: number, c: number) => {
+  const x = triangles[start], y = triangles[start + 1], z = triangles[start + 2];
+  return (a === x && b === z && c === y) || (a === y && b === x && c === z) || (a === z && b === y && c === x);
+};
+
 // Interface for the Jolt instance (using any because Jolt WASM types vary by implementation/version)
 type JoltInstance = any;
 
@@ -77,7 +83,8 @@ export class SoftBodyCreator {
       positions.count > 65_535 ? Uint32Array : Uint16Array;
     const renderIndices = new RenderIndexArray(sourceIndexCount);
     const face = new Jolt.SoftBodySharedSettingsFace(0, 0, 0, 0);
-    const physicsFaces = new Set<string>();
+    // Face key -> its triangle start in physicsTriangles, or -1 once removed.
+    const physicsFaces = new Map<string, number>();
     const physicsTriangles: number[] = [];
 
     for (let i = 0; i < sourceIndexCount; i += 3) {
@@ -102,13 +109,23 @@ export class SoftBodyCreator {
       const faceKey = [physicsA, physicsB, physicsC]
         .sort((a, b) => a - b)
         .join(",");
-      if (physicsFaces.has(faceKey)) {
+      const existing = physicsFaces.get(faceKey);
+      if (existing !== undefined) {
+        // An oppositely wound copy is a zero-thickness double wall: drop both so the shell stays
+        // sealed. A same-wound copy is a plain duplicate: keep one.
+        if (existing >= 0 && isReversed(physicsTriangles, existing, physicsA, physicsB, physicsC)) {
+          physicsTriangles.fill(-1, existing, existing + 3);
+          physicsFaces.set(faceKey, -1);
+        }
         continue;
       }
-      physicsFaces.add(faceKey);
+      physicsFaces.set(faceKey, physicsTriangles.length);
 
       physicsTriangles.push(physicsA, physicsB, physicsC);
     }
+    const keptTriangles = physicsTriangles.filter((index) => index >= 0);
+    physicsTriangles.length = 0;
+    physicsTriangles.push(...keptTriangles);
     const topology = analyzeMeshTopology(weldedPositions, physicsTriangles);
     for (let i = 0; i < physicsTriangles.length; i += 3) {
       face.set_mVertex(0, physicsTriangles[i]);
