@@ -115,6 +115,19 @@ const unit = new THREE.Vector3(1, 1, 1);
 const relative = new THREE.Matrix4();
 const box = new THREE.Box3();
 const boxes: THREE.Box3[] = [];
+const travel: number[] = [];
+
+/** Largest distance any vertex moved during the last step. */
+const maxTravel = (surface: SoftSurface) => {
+  const p = surface.index.positions, q = surface.previous;
+  let best = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    const dx = p[i] - q[i], dy = p[i + 1] - q[i + 1], dz = p[i + 2] - q[i + 2];
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d > best) best = d;
+  }
+  return Math.sqrt(best);
+};
 const hit = createSurfaceHit();
 
 const worldBounds = (surface: SoftSurface, target: THREE.Box3, margin: number) => {
@@ -128,9 +141,9 @@ const worldBounds = (surface: SoftSurface, target: THREE.Box3, margin: number) =
 /**
  * Jolt does not collide soft bodies with each other. After each fixed step this pushes every
  * vertex of one soft body out of the other's surface (closed shells by inside test, open
- * surfaces by a `thickness` shell), splitting the correction by inverse mass, and removes the
- * approaching normal velocity. shortcut: discrete per step, so a vertex that crosses an open
- * surface within one step is not caught; reduce `timeStep` or raise `thickness` if cloth passes through.
+ * surfaces by a `thickness` shell, keeping each vertex on the side it was on last step), splitting the correction by inverse mass, and removes the
+ * approaching normal velocity. shortcut: discrete per step, so an edge or face that crosses
+ * another without a vertex inside it is not caught; reduce `timeStep` or raise `thickness` if that shows.
  */
 export function collideSoftBodies(
   jolt: typeof Jolt,
@@ -144,7 +157,8 @@ export function collideSoftBodies(
     list[i].sync();
     list[i].updateTransform();
     boxes[i] ??= new THREE.Box3();
-    worldBounds(list[i], boxes[i], minimumThickness);
+    travel[i] = maxTravel(list[i]);
+    worldBounds(list[i], boxes[i], minimumThickness + travel[i]);
   }
   const touched = new Set<SoftSurface>();
   for (let i = 0; i < list.length; i += 1) {
@@ -153,7 +167,8 @@ export function collideSoftBodies(
       if (!a.body.IsActive() && !b.body.IsActive()) continue;
       if (!boxes[i].intersectsBox(boxes[j])) continue;
       const thickness = Math.max(minimumThickness, a.motion.GetVertexRadius() + b.motion.GetVertexRadius());
-      if (pushOut(jolt, a, b, thickness) | pushOut(jolt, b, a, thickness)) {
+      const reach = thickness + travel[i] + travel[j];
+      if (pushOut(jolt, a, b, thickness, reach) | pushOut(jolt, b, a, thickness, reach)) {
         touched.add(a);
         touched.add(b);
       }
@@ -167,17 +182,18 @@ export function collideSoftBodies(
 }
 
 /** Pushes `mover`'s vertices out of `surface`. Returns 1 if anything moved. */
-function pushOut(jolt: typeof Jolt, mover: SoftSurface, target: SoftSurface, thickness: number): number {
+function pushOut(jolt: typeof Jolt, mover: SoftSurface, target: SoftSurface, thickness: number, reach: number): number {
   const index = target.index;
   if (index.triangleCount === 0) return 0;
   index.ensureNormals();
   const heap = jolt.HEAPF32;
   // mover-local -> target-local; both are rigid transforms.
   const e = relative.multiplyMatrices(target.inverse, mover.matrix).elements;
-  const minX = index.min[0] - thickness, minY = index.min[1] - thickness, minZ = index.min[2] - thickness;
-  const maxX = index.max[0] + thickness, maxY = index.max[1] + thickness, maxZ = index.max[2] + thickness;
-  const p = mover.index.positions, idx = index.indices, closed = index.closed;
-  const limit = closed ? Infinity : thickness * thickness;
+  const minX = index.min[0] - reach, minY = index.min[1] - reach, minZ = index.min[2] - reach;
+  const maxX = index.max[0] + reach, maxY = index.max[1] + reach, maxZ = index.max[2] + reach;
+  const p = mover.index.positions, q = mover.previous, tq = target.previous, idx = index.indices, closed = index.closed;
+  // Open surfaces: search as far as anything moved this step, so a vertex that tunnelled through is still found.
+  const limit = closed ? Infinity : reach * reach;
   let moved = 0;
   for (let k = 0; k < mover.vertexCount; k += 1) {
     const wa = mover.invMass[k];
@@ -189,12 +205,22 @@ function pushOut(jolt: typeof Jolt, mover: SoftSurface, target: SoftSurface, thi
     if (!index.nearest(x, y, z, hit, limit)) continue;
     const side = (x - hit.x) * hit.nx + (y - hit.y) * hit.ny + (z - hit.z) * hit.nz;
     let nx = hit.nx, ny = hit.ny, nz = hit.nz;
+    const ta = idx[hit.triangle * 3], tb = idx[hit.triangle * 3 + 1], tc = idx[hit.triangle * 3 + 2];
     if (closed) {
       if (side >= 0 && hit.distanceSq >= thickness * thickness) continue;
-    } else if (side < 0) {
-      nx = -nx; ny = -ny; nz = -nz;
+    } else {
+      // Keep the vertex on the side it was on last step: same barycentric point on the old surface.
+      const ox = e[0] * q[k * 3] + e[4] * q[k * 3 + 1] + e[8] * q[k * 3 + 2] + e[12];
+      const oy = e[1] * q[k * 3] + e[5] * q[k * 3 + 1] + e[9] * q[k * 3 + 2] + e[13];
+      const oz = e[2] * q[k * 3] + e[6] * q[k * 3 + 1] + e[10] * q[k * 3 + 2] + e[14];
+      const sx = hit.u * tq[ta * 3] + hit.v * tq[tb * 3] + hit.w * tq[tc * 3];
+      const sy = hit.u * tq[ta * 3 + 1] + hit.v * tq[tb * 3 + 1] + hit.w * tq[tc * 3 + 1];
+      const sz = hit.u * tq[ta * 3 + 2] + hit.v * tq[tb * 3 + 2] + hit.w * tq[tc * 3 + 2];
+      const before = (ox - sx) * nx + (oy - sy) * ny + (oz - sz) * nz;
+      if ((before !== 0 ? before : side) < 0) {
+        nx = -nx; ny = -ny; nz = -nz;
+      }
     }
-    const ta = idx[hit.triangle * 3], tb = idx[hit.triangle * 3 + 1], tc = idx[hit.triangle * 3 + 2];
     const wu = hit.u * target.invMass[ta], wv = hit.v * target.invMass[tb], ww = hit.w * target.invMass[tc];
     const denominator = wa + hit.u * wu + hit.v * wv + hit.w * ww;
     if (denominator <= 0) continue;

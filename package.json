@@ -42,7 +42,7 @@
     "build": "tsc --noEmit && npm run build:lib && npm run build:demo",
     "build:lib": "tsup",
     "build:demo": "vite build",
-    "test": "npm run build:lib && node tests/physics.test.mjs",
+    "test": "npm run build:lib && node tests/physics.test.mjs && node tests/soft-collision.test.mjs",
     "prepare": "npm run build:lib",
     "preview": "vite preview",
     "prepublishOnly": "npm run build && npm test"
