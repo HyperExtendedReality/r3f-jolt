@@ -7,6 +7,78 @@ const isReversed = (triangles: number[], start: number, a: number, b: number, c:
   return (a === x && b === z && c === y) || (a === y && b === x && c === z) || (a === z && b === y && c === x);
 };
 
+/** Connected triangle islands, as a component id per vertex. */
+const findIslands = (vertexCount: number, triangles: ArrayLike<number>) => {
+  const parent = Array.from({ length: vertexCount }, (_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < triangles.length; i += 3) {
+    parent[find(triangles[i + 1])] = find(triangles[i]);
+    parent[find(triangles[i + 2])] = find(triangles[i]);
+  }
+  return parent.map((_, i) => find(i));
+};
+
+/**
+ * Ties separate parts of one mesh (e.g. a model's limbs and eyes) together with edge constraints,
+ * so they move as one body instead of falling apart. Each part is linked to the nearest vertices
+ * of the other parts: every pair closer than 1.5x the mean edge length, and at least 4 pairs.
+ * shortcut: O(parts' vertices x other vertices), fine for game-sized meshes; use a grid if huge.
+ */
+const weldParts = (Jolt: JoltInstance, settings: any, positions: number[], triangles: number[], compliance: number) => {
+  const vertexCount = positions.length / 3;
+  const island = findIslands(vertexCount, triangles);
+  const islands = new Set(island);
+  if (islands.size < 2) return;
+
+  let edgeSum = 0;
+  for (let i = 0; i < triangles.length; i += 3) {
+    const a = triangles[i] * 3, b = triangles[i + 1] * 3;
+    edgeSum += Math.hypot(positions[a] - positions[b], positions[a + 1] - positions[b + 1], positions[a + 2] - positions[b + 2]);
+  }
+  const reach = (1.5 * edgeSum) / (triangles.length / 3);
+  const used = new Set<string>();
+  const edge = new Jolt.SoftBodySharedSettingsEdge(0, 0, compliance);
+  const link = (a: number, b: number) => {
+    const key = a < b ? `${a},${b}` : `${b},${a}`;
+    if (used.has(key)) return;
+    used.add(key);
+    edge.set_mVertex(0, a);
+    edge.set_mVertex(1, b);
+    settings.mEdgeConstraints.push_back(edge);
+  };
+
+  // Repeat until one group: each pass links every group to its nearest neighbour, so two parts
+  // that only touch each other still get tied to the rest.
+  let group = island;
+  while (new Set(group).size > 1) {
+    const next = [...group];
+    for (const part of new Set(group)) {
+      // Nearest vertex outside the group, for every vertex of the group.
+      const pairs: [number, number, number][] = [];
+      for (let a = 0; a < vertexCount; a += 1) {
+        if (group[a] !== part) continue;
+        let best = -1, bestDistance = Infinity;
+        for (let b = 0; b < vertexCount; b += 1) {
+          if (group[b] === part) continue;
+          const d = Math.hypot(positions[a * 3] - positions[b * 3], positions[a * 3 + 1] - positions[b * 3 + 1], positions[a * 3 + 2] - positions[b * 3 + 2]);
+          if (d < bestDistance) { bestDistance = d; best = b; }
+        }
+        pairs.push([bestDistance, a, best]);
+      }
+      pairs.sort((x, y) => x[0] - y[0]);
+      pairs.forEach(([distance, a, b], i) => {
+        if (i >= 4 && distance > reach) return;
+        link(a, b);
+        // Merge the two groups in `next`.
+        const from = next[b], to = next[a];
+        for (let v = 0; v < vertexCount; v += 1) if (next[v] === from) next[v] = to;
+      });
+    }
+    group = next;
+  }
+  Jolt.destroy(edge);
+};
+
 // Interface for the Jolt instance (using any because Jolt WASM types vary by implementation/version)
 type JoltInstance = any;
 
@@ -147,6 +219,7 @@ export class SoftBodyCreator {
       Jolt.destroy(defaultAttributes);
     }
 
+    weldParts(Jolt, sharedSettings, weldedPositions, physicsTriangles, inVertexAttributes?.mCompliance ?? 1.0e-4);
     sharedSettings.CalculateEdgeLengths();
     sharedSettings.CalculateVolumeConstraintVolumes();
     sharedSettings.Optimize();

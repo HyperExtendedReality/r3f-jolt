@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import initJolt from "jolt-physics/wasm-compat";
 import {
   SoftBodyCreator,
@@ -75,7 +76,14 @@ jolt.destroy(scaled);
 const custom = SoftBodyCreator.CreateFromGeometry(jolt, box);
 assert.equal(custom.closed, true);
 checkSoftBody("custom box", custom);
-const bag = new THREE.SphereGeometry(1, 24, 16).scale(1.35, 2.1, 0.55);
+// Separate parts of one mesh are tied together with extra edges, so they cannot fall apart.
+const partA = new THREE.BoxGeometry(1, 1, 1), partB = new THREE.BoxGeometry(1, 1, 1).translate(0.6, 0.3, 0);
+const single = SoftBodyCreator.CreateFromGeometry(jolt, partA);
+const welded = SoftBodyCreator.CreateFromGeometry(jolt, mergeGeometries([partA, partB]));
+assert.ok(welded.settings.mEdgeConstraints.size() >= 2 * single.settings.mEdgeConstraints.size() + 4, "parts must be welded");
+jolt.destroy(single.settings);
+jolt.destroy(welded.settings);
+const bag =new THREE.SphereGeometry(1, 24, 16).scale(1.35, 2.1, 0.55);
 const bagData = SoftBodyCreator.CreateFromGeometry(jolt, bag);
 assert.equal(bagData.closed, true, "demo inflated bag must be sealed");
 jolt.destroy(bagData.settings);

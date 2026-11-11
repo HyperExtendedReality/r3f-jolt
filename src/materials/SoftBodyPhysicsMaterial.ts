@@ -29,7 +29,9 @@ export const softBodyMaterials = {
     iterations: 12,
     friction: 0.8,
     restitution: 0.05,
-    linearDamping: 0.08,
+    // Enough damping and contact margin that a crumpled bag settles and sleeps instead of shimmering.
+    linearDamping: 0.4,
+    vertexRadius: 0.02,
   },
   chipBagInflated: {
     inverseMass: 1,
@@ -40,12 +42,15 @@ export const softBodyMaterials = {
     iterations: 12,
     friction: 0.8,
     restitution: 0.1,
-    linearDamping: 0.08,
+    // Enough damping and contact margin that a crumpled bag settles and sleeps instead of shimmering.
+    linearDamping: 0.4,
+    vertexRadius: 0.02,
   },
   slime: {
     inverseMass: 0.5,
-    compliance: 2e-3,
-    shearCompliance: 2e-3,
+    // Stiffer edges than bends: with 2e-3 edges the shell sagged and its folds jittered at rest.
+    compliance: 2e-4,
+    shearCompliance: 2e-4,
     bendCompliance: 5e-3,
     volumeCompliance: 1e-6,
     pressure: 0,
@@ -53,6 +58,7 @@ export const softBodyMaterials = {
     friction: 1.5,
     restitution: 0,
     linearDamping: 0.3,
+    vertexRadius: 0.02,
   },
   bouncySlime: {
     inverseMass: 0.5,

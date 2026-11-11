@@ -7,11 +7,13 @@ import {
 } from "@react-three/drei";
 import { Suspense, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { PhysicsProvider } from "../context/JoltContext";
 import { RigidBody } from "../components/RigidBody";
 import { SoftBody } from "../components/SoftBody";
 import { BreakableBody } from "../components/BreakableBody";
 import { MetallicChipBagMaterial } from "../materials/MetallicChipBagMaterial";
+import { softBodyMaterials } from "../materials/SoftBodyPhysicsMaterial";
 
 const laysChipsUrl = new URL("../assets/lays_chips.glb", import.meta.url).href;
 
@@ -108,6 +110,49 @@ function LaysChipsSoftBody() {
 }
 
 useGLTF.preload(laysChipsUrl);
+
+const ferrisUrl = new URL("../assets/ferris-rustacean.glb", import.meta.url).href;
+
+function FerrisSoftBody() {
+  const gltf = useGLTF(ferrisUrl);
+  const { geometry, material } = useMemo(() => {
+    gltf.scene.updateWorldMatrix(true, true);
+    const parts: THREE.BufferGeometry[] = [];
+    let sourceMaterial: THREE.Material | undefined;
+    gltf.scene.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      sourceMaterial ??= object.material as THREE.Material;
+      // Positions and UVs only, so parts with different attribute sets still merge.
+      const part = new THREE.BufferGeometry();
+      part.setAttribute("position", object.geometry.getAttribute("position").clone());
+      part.setAttribute("uv", object.geometry.getAttribute("uv").clone());
+      part.setIndex(object.geometry.getIndex()!.clone());
+      parts.push(part.applyMatrix4(object.matrixWorld));
+    });
+    const merged = mergeGeometries(parts)!;
+    parts.forEach((part) => part.dispose());
+    merged.center();
+    merged.computeBoundingBox();
+    const size = merged.boundingBox!.getSize(new THREE.Vector3());
+    const scale = 3 / Math.max(size.x, size.y, size.z);
+    merged.scale(scale, scale, scale);
+    return { geometry: merged, material: sourceMaterial };
+  }, [gltf.scene]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  return (
+    <SoftBody
+      geometry={geometry}
+      material={material}
+      position={[-9, 6, 9]}
+      // Slime's stretchy edges let a hollow shell sag flat, and flattened bends flip back and forth (jitter).
+      physicsMaterial={{ ...softBodyMaterials.slime, compliance: 1e-5, shearCompliance: 1e-5 }}
+      castShadow
+    />
+  );
+}
+
+useGLTF.preload(ferrisUrl);
 
 export default function App() {
   const breakableGeometry = useMemo(() => new THREE.BoxGeometry(1.5, 1.5, 1.5), []);
@@ -219,6 +264,7 @@ export default function App() {
 
         <Suspense fallback={null}>
           <LaysChipsSoftBody />
+          <FerrisSoftBody />
         </Suspense>
       </PhysicsProvider>
 
